@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 195 35% 97%;
+  --foreground: 203 37% 10%;
+  --muted: 188 18% 90%;
+  --muted-foreground: 199 12% 38%;
+  --border: 190 18% 82%;
+  --primary: 188 88% 30%;
+  --primary-foreground: 0 0% 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  color: hsl(var(--foreground));
+  background:
+    radial-gradient(circle at 20% 10%, rgba(20, 184, 166, 0.22), transparent 28rem),
+    radial-gradient(circle at 85% 15%, rgba(244, 114, 182, 0.16), transparent 25rem),
+    linear-gradient(135deg, #eef9f8 0%, #f8fafc 48%, #eef2ff 100%);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
