@@ -10,6 +10,7 @@ This repository currently contains the initial scaffold:
 - Filesystem storage for original pickle files and current snapshots
 - Generic Python object profiling for DataFrames, Series, ndarrays, mappings, collections, nested JSON-like values, and custom objects
 - Python execution runtime for agent-generated code with stdout/traceback capture, state mutation snapshots, and table/chart/CSV artifact helpers
+- General-purpose coding agent loop with minimal tools and Server-Sent Events trace streaming
 - React + Vite + TypeScript frontend shell
 - Tailwind styling with shadcn-inspired primitives
 - Frontend health check against the backend
@@ -54,6 +55,11 @@ Backend helper scripts are available through `make dev`, `make test`, and `make 
 - `POST /api/sessions/{session_id}/datasets`
 - `GET /api/sessions/{session_id}/datasets`
 - `GET /api/sessions/{session_id}/datasets/{dataset_id}`
+- `POST /api/sessions/{session_id}/chat/stream`
+
+The chat stream endpoint returns Server-Sent Events such as `message_started`, `trace`,
+`code_started`, `code_result_summary`, `confirmation_required`, `artifact_created`,
+`final_answer`, `message_done`, and `error`.
 
 ## Frontend Setup
 
@@ -84,9 +90,17 @@ Runtime helper functions available to executed code:
 - `save_chart(name, chart_spec)`
 - `save_csv(name, dataframe_or_records)`
 
+## Agent
+
+The backend includes a general-purpose data analysis coding agent in `app/agent`. It uses only
+minimal tools: `execute_python`, `final_answer`, and `request_confirmation`. The agent prompt
+requires schema inspection before analysis, avoids fixed analytics routers, retries failed Python
+attempts up to three times, streams concise public progress traces, and keeps final answers
+separate from trace events.
+
 ## Implementation Notes
 
-Future phases will add the OpenAI-backed coding agent abstraction, SSE trace streaming, branch/fork mutation operations beyond the initial version graph, confirmation flows, and frontend access to generated artifacts.
+Future phases will add frontend chat consumption of the SSE stream, branch/fork mutation operations beyond the initial version graph, richer confirmation flows, and frontend access to generated artifacts.
 
 ## Security Note
 

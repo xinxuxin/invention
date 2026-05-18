@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     app_name: str = "Data Analysis Agent API"
     database_url: str = "sqlite:///./data_analysis_agent.db"
     storage_dir: str = ".data"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4.1"
     backend_cors_origins: list[AnyHttpUrl] = Field(default_factory=lambda: ["http://localhost:5173"])
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

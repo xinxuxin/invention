@@ -36,3 +36,13 @@
 - Verified backend tests pass: `16 passed`.
 - Verified backend lint passes: `ruff check app tests`.
 - Updated READMEs with runtime behavior and honest security limitations.
+- Started general-purpose coding agent phase.
+- Added agent system prompt and context prompt builder with schema-agnostic data-analysis rules and no hidden chain-of-thought exposure.
+- Added minimal tool schemas and runner for `execute_python`, `final_answer`, and `request_confirmation`; no fixed analytics tools were added.
+- Added OpenAI Responses model client abstraction plus scripted fake model support for tests.
+- Added `CodingAgent` loop that reads session context, streams public trace events, executes Python, observes results, retries failed execution, handles confirmation requirements, streams artifacts, and emits final answers separately.
+- Added `POST /api/sessions/{session_id}/chat/stream` SSE endpoint with message, trace, code, result, confirmation, artifact, final answer, done, and error event types.
+- Added backend tests for streamed trace/final answer flow, Python execution from agent, retry after code failure, destructive mutation confirmation, confirmed mutation state changes, and artifact events.
+- Verified backend tests pass: `21 passed`.
+- Verified backend lint passes: `ruff check app tests`.
+- Verified frontend build still passes: `npm run build`.

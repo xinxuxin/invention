@@ -25,6 +25,7 @@ make dev
 - `POST /api/sessions/{session_id}/datasets` uploads one or more `.pkl` files, stores originals and initial snapshots, creates initial version nodes, and returns generic object profiles.
 - `GET /api/sessions/{session_id}/datasets` lists datasets in a session.
 - `GET /api/sessions/{session_id}/datasets/{dataset_id}` returns one dataset profile and current version metadata.
+- `POST /api/sessions/{session_id}/chat/stream` streams general-purpose coding agent events over Server-Sent Events.
 
 ## Python Execution Runtime
 
@@ -37,6 +38,15 @@ Helper functions available inside executed code:
 - `save_chart(name, chart_spec)`
 - `save_csv(name, dataframe_or_records)`
 
+## Coding Agent
+
+`app/agent` contains the general-purpose data analysis coding agent. It provides only three tools
+to the model: `execute_python`, `final_answer`, and `request_confirmation`. The agent builds a
+session context from dataset profiles, active branch/version metadata, conversation history, and
+available artifacts. It streams public trace events only, executes Python through the runtime,
+observes results, retries failed Python attempts up to three times, requests confirmation before
+destructive mutations, and emits final answers separately from trace events.
+
 ## Security Note
 
 Loading arbitrary pickle files is unsafe in production because pickle payloads can execute code during deserialization. This take-home assumes trusted demo files. A production implementation should move pickle loading into an isolated worker or sandbox with strict resource limits.
@@ -47,4 +57,4 @@ The Python executor is not a secure sandbox. It runs in a child process with tim
 
 - SQLModel persistence with SQLite
 - General-purpose coding agent abstraction over the OpenAI API
-- Server-Sent Events for streamed agent traces
+- Frontend chat integration for streamed agent traces
