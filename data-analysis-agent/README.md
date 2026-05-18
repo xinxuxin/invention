@@ -5,6 +5,10 @@ A take-home full-stack project for uploading arbitrary pickle datasets and chatt
 This repository currently contains the initial scaffold:
 
 - FastAPI backend with a `/health` endpoint
+- Session creation and pickle dataset upload endpoints
+- SQLite metadata storage with SQLModel
+- Filesystem storage for original pickle files and current snapshots
+- Generic Python object profiling for DataFrames, Series, ndarrays, mappings, collections, nested JSON-like values, and custom objects
 - React + Vite + TypeScript frontend shell
 - Tailwind styling with shadcn-inspired primitives
 - Frontend health check against the backend
@@ -42,6 +46,14 @@ The API should be available at `http://localhost:8000`.
 
 Backend helper scripts are available through `make dev`, `make test`, and `make lint`.
 
+## Backend API
+
+- `POST /api/sessions`
+- `GET /api/sessions/{session_id}`
+- `POST /api/sessions/{session_id}/datasets`
+- `GET /api/sessions/{session_id}/datasets`
+- `GET /api/sessions/{session_id}/datasets/{dataset_id}`
+
 ## Frontend Setup
 
 ```bash
@@ -62,4 +74,8 @@ cp .env.example .env
 
 ## Implementation Notes
 
-Future phases will add dataset upload, persisted multi-dataset sessions, the OpenAI-backed coding agent abstraction, Python execution runtime, SSE trace streaming, branch/fork mutation history, visualization artifacts, confirmation flows, and CSV export.
+Future phases will add the OpenAI-backed coding agent abstraction, Python execution runtime, SSE trace streaming, branch/fork mutation operations beyond the initial version graph, visualization artifacts, confirmation flows, and CSV export.
+
+## Security Note
+
+Loading arbitrary pickle files is unsafe in production because pickle payloads can execute code during deserialization. This take-home currently assumes trusted demo files. A production implementation should load user-submitted pickles only inside an isolated worker or sandbox with strict resource limits and no access to sensitive host resources.
