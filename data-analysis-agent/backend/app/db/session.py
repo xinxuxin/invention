@@ -10,7 +10,7 @@ engine = create_engine(settings.database_url, connect_args=connect_args)
 
 
 def init_db() -> None:
-    from app.models.entities import AnalysisSession, Branch, Dataset, VersionNode  # noqa: F401
+    from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode  # noqa: F401
 
     SQLModel.metadata.create_all(engine)
 

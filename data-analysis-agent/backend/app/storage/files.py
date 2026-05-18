@@ -31,6 +31,12 @@ def snapshots_root(session_id: str, dataset_id: str) -> Path:
     return root
 
 
+def artifacts_root(session_id: str) -> Path:
+    root = session_root(session_id) / "artifacts"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def safe_filename(filename: str) -> str:
     candidate = Path(filename).name.strip()
     return candidate or "uploaded.pkl"

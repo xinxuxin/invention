@@ -27,3 +27,12 @@
 - Re-verified backend tests: `7 passed`.
 - Re-verified backend lint: `ruff check app tests`.
 - Re-verified frontend build: `npm run build`.
+- Started backend Python execution runtime phase.
+- Added `.Rhistory` to git ignore after a local untracked R history file appeared; the file itself is not part of the project.
+- Added artifact metadata model and filesystem artifact root helper.
+- Added `backend/app/runtime/python_executor.py` with child-process execution, timeout handling, stdout/stderr capture, traceback return, JSON-safe previews, basic network blocking, mutation persistence, and table/chart/CSV artifact helper support.
+- Added runtime tests for DataFrame inspection, read-only execution, active dataset mutation, `datasets[...]` assignment mutation, exception tracebacks, JSON-safe previews, artifact persistence, timeouts, and network import blocking.
+- Fixed mutation persistence so unchanged `data` aliases do not overwrite explicit `datasets["name"] = ...` assignments.
+- Verified backend tests pass: `16 passed`.
+- Verified backend lint passes: `ruff check app tests`.
+- Updated READMEs with runtime behavior and honest security limitations.

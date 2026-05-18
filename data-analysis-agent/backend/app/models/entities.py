@@ -60,3 +60,17 @@ class VersionNode(SQLModel, table=True):
     snapshot_path: str
     profile: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class Artifact(SQLModel, table=True):
+    __tablename__ = "artifacts"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    session_id: str = Field(foreign_key="analysis_sessions.id", index=True)
+    dataset_id: str | None = Field(default=None, foreign_key="datasets.id", index=True)
+    version_id: str | None = Field(default=None, foreign_key="version_nodes.id", index=True)
+    name: str
+    kind: str = Field(index=True)
+    path: str
+    artifact_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
