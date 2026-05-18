@@ -11,6 +11,12 @@ pip install -e ".[dev]"
 uvicorn app.main:app --reload
 ```
 
+Or use the backend helper:
+
+```bash
+make dev
+```
+
 ## Current Endpoints
 
 - `GET /health` returns service status for local development and frontend connectivity checks.

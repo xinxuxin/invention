@@ -40,6 +40,8 @@ uvicorn app.main:app --reload
 
 The API should be available at `http://localhost:8000`.
 
+Backend helper scripts are available through `make dev`, `make test`, and `make lint`.
+
 ## Frontend Setup
 
 ```bash
