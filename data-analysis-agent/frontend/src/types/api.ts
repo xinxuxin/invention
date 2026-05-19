@@ -174,7 +174,23 @@ export type ChatStreamEvent =
       affected_dataset_ids?: string[];
     }
   | { type: "artifact_created"; artifact: ExecutionArtifact }
-  | { type: "final_answer"; answer: string; state_changed?: boolean }
+  | {
+      type: "final_answer";
+      answer: string;
+      state_changed?: boolean;
+      highlights?: Array<Record<string, unknown>>;
+      key_findings?: string[];
+      warnings?: string[];
+      artifact_ids?: string[];
+    }
+  | {
+      type: "verifier_result";
+      message?: string;
+      passed?: boolean;
+      severity?: string;
+      source?: string;
+      reasons?: string[];
+    }
   | { type: "message_done" }
   | { type: "error"; message: string };
 

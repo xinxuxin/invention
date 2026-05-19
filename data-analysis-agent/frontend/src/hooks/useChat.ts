@@ -19,6 +19,8 @@ export type ChatTraceEvent = {
   traceback?: string | null;
   resultPreview?: unknown;
   updatedDatasets?: UpdatedDataset[];
+  severity?: string;
+  source?: string;
 };
 
 export type ChatMessage = {
@@ -28,6 +30,9 @@ export type ChatMessage = {
   status?: "streaming" | "done" | "error" | "waiting_confirmation";
   trace: ChatTraceEvent[];
   finalAnswer?: string;
+  highlights?: Array<Record<string, unknown>>;
+  keyFindings?: string[];
+  warnings?: string[];
   stateChanged?: boolean;
   artifacts: ExecutionArtifact[];
 };
@@ -299,6 +304,9 @@ function handleStreamEvent({
               ...message,
               status: "done",
               finalAnswer: event.answer,
+              highlights: event.highlights,
+              keyFindings: event.key_findings,
+              warnings: event.warnings,
               stateChanged: Boolean(event.state_changed),
             }
           : message,
@@ -387,6 +395,16 @@ function toTraceEvent(event: ChatStreamEvent): ChatTraceEvent {
 
   if (event.type === "error") {
     return { id: crypto.randomUUID(), type: event.type, message: event.message };
+  }
+
+  if (event.type === "verifier_result") {
+    return {
+      id: crypto.randomUUID(),
+      type: event.type,
+      message: event.message,
+      severity: event.severity,
+      source: event.source,
+    };
   }
 
   return { id: crypto.randomUUID(), type: event.type };

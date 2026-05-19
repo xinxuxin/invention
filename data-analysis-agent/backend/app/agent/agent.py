@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -10,7 +11,10 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.agent.prompts import SYSTEM_PROMPT, build_context_prompt
+from app.agent.response_composer import ResponseComposer, composed_answer_event
 from app.agent.tools import AGENT_TOOLS, AgentToolRunner, looks_destructive, parse_tool_arguments, risk_level_for_code
+from app.agent.verifier import ResultVerifier, merge_verification_results, verifier_trace_message
+from app.agent.llm_verifier import LLMVerifier
 from app.core.config import get_settings
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
 from app.runtime.python_executor import ExecutionResult, PythonExecutor
@@ -23,8 +27,8 @@ from app.services.versioning import (
     sync_branch_pointer,
 )
 
-MAX_AGENT_STEPS = 8
-MAX_EXECUTION_ATTEMPTS = 3
+MAX_AGENT_STEPS = get_settings().agent_max_steps
+MAX_EXECUTION_ATTEMPTS = get_settings().agent_max_retries
 
 
 class ChatHistoryMessage(BaseModel):
@@ -128,6 +132,32 @@ class FakeAgentModelClient:
         last_item = input_items[-1] if input_items else {}
         if last_item.get("type") == "function_call_output":
             output = parse_tool_arguments(str(last_item.get("output", "{}")))
+            verifier = output.get("verifier") if isinstance(output.get("verifier"), dict) else {}
+            retry_instruction = str(verifier.get("retry_instruction") or "")
+            if "save_table" in retry_instruction:
+                return _fake_tool_response(
+                    "execute_python",
+                    {
+                        "code": _fake_table_code(),
+                        "mutates_state": False,
+                    },
+                )
+            if "save_chart" in retry_instruction:
+                return _fake_tool_response(
+                    "execute_python",
+                    {
+                        "code": _fake_chart_code(),
+                        "mutates_state": False,
+                    },
+                )
+            if "save_csv" in retry_instruction:
+                return _fake_tool_response(
+                    "execute_python",
+                    {
+                        "code": "df = to_dataframe(data, limit=500)\nsave_csv('Verified export', df.head(50))\npreview({'rows': min(len(df), 50), 'columns': list(df.columns)})",
+                        "mutates_state": False,
+                    },
+                )
             if output.get("ok") is False and self.recovery_started:
                 return _fake_tool_response(
                     "execute_python",
@@ -172,6 +202,33 @@ class FakeAgentModelClient:
                 "execute_python",
                 {
                     "code": _fake_chart_code(),
+                    "mutates_state": False,
+                },
+            )
+
+        if "schema" in prompt:
+            return _fake_tool_response(
+                "execute_python",
+                {
+                    "code": _fake_schema_code(),
+                    "mutates_state": False,
+                },
+            )
+
+        if any(term in prompt for term in ("export", "csv", "download")):
+            return _fake_tool_response(
+                "execute_python",
+                {
+                    "code": "df = to_dataframe(data, limit=500)\nsave_csv('Fake agent export', df.head(50))\npreview({'rows': min(len(df), 50), 'columns': list(df.columns)})",
+                    "mutates_state": False,
+                },
+            )
+
+        if any(term in prompt for term in ("table", "rows", "preview", "top", "breakdown", "count per")):
+            return _fake_tool_response(
+                "execute_python",
+                {
+                    "code": _fake_table_code(),
                     "mutates_state": False,
                 },
             )
@@ -232,10 +289,16 @@ class CodingAgent:
         *,
         model_client: AgentModelClient | None = None,
         executor: PythonExecutor | None = None,
+        verifier: ResultVerifier | None = None,
+        llm_verifier: LLMVerifier | None = None,
+        response_composer: ResponseComposer | None = None,
     ) -> None:
         self.db = db
         self.model_client = model_client or OpenAIResponsesClient()
         self.executor = executor or PythonExecutor(db)
+        self.verifier = verifier or ResultVerifier()
+        self.llm_verifier = llm_verifier or LLMVerifier()
+        self.response_composer = response_composer or ResponseComposer()
 
     def stream(
         self,
@@ -262,6 +325,18 @@ class CodingAgent:
         else:
             yield {"type": "trace", "message": "No datasets are uploaded yet; preparing a direct response..."}
 
+        clarification = _clarification_for_ambiguous_destructive_request(request.message)
+        if clarification:
+            yield {
+                "type": "final_answer",
+                "answer": clarification,
+                "state_changed": False,
+                "highlights": [{"label": "State changed", "value": "No"}],
+                "warnings": ["Clarification is required before a potentially destructive mutation."],
+            }
+            yield {"type": "message_done"}
+            return
+
         shortcut_events = self._history_shortcut(session_id, request)
         if shortcut_events is not None:
             for event in shortcut_events:
@@ -276,16 +351,37 @@ class CodingAgent:
             active_dataset_id=request.active_dataset_id,
             branch_name=request.branch_name,
         )
+        settings = get_settings()
+        max_steps = settings.agent_max_steps
+        max_retries = settings.agent_max_retries
+        turn_started_at = time.monotonic()
         failed_execution_attempts = 0
+        verifier_retry_attempts = 0
+        verifier_feedback: str | None = None
         state_changed = False
         last_execution_result: ExecutionResult | None = None
         informative_execution_result: ExecutionResult | None = None
+        artifacts_for_message: list[Any] = []
 
-        for _ in range(MAX_AGENT_STEPS):
+        for step_index in range(max_steps):
             try:
                 model_response = self.model_client.create_response(
                     instructions=SYSTEM_PROMPT,
-                    input_items=input_items,
+                    input_items=(
+                        [
+                            *input_items,
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Verifier feedback for the next attempt:\n"
+                                    f"{verifier_feedback}\n\n"
+                                    "Use the same minimal tools and fix only the missing requirement."
+                                ),
+                            },
+                        ]
+                        if verifier_feedback
+                        else input_items
+                    ),
                     tools=AGENT_TOOLS,
                 )
             except Exception as exc:
@@ -298,16 +394,30 @@ class CodingAgent:
                 for tool_call in model_response.tool_calls:
                     arguments = tool_call.arguments
                     if tool_call.name == "execute_python":
-                        if failed_execution_attempts >= MAX_EXECUTION_ATTEMPTS:
+                        if failed_execution_attempts >= max_retries:
                             yield {
                                 "type": "trace",
                                 "message": "Python kept failing; preparing the clearest answer from the last traceback...",
                             }
-                            yield {
-                                "type": "final_answer",
-                                "answer": _fallback_answer_from_execution(last_execution_result),
-                                "state_changed": state_changed,
-                            }
+                            answer = self.response_composer.compose_failure(
+                                execution_result=last_execution_result,
+                                verification=merge_verification_results(
+                                    self.verifier.verify(
+                                        user_message=request.message,
+                                        execution_result=last_execution_result,
+                                        artifacts_created_this_turn=[],
+                                        all_artifacts_for_message=artifacts_for_message,
+                                        current_step=step_index,
+                                        max_steps=max_steps,
+                                        retries_remaining=False,
+                                        state_changed=state_changed,
+                                    ),
+                                    None,
+                                    min_confidence=settings.llm_verifier_min_confidence,
+                                ),
+                                state_changed=state_changed,
+                            )
+                            yield composed_answer_event(answer)
                             yield {"type": "message_done"}
                             return
 
@@ -354,6 +464,7 @@ class CodingAgent:
                         if _execution_has_user_value(result) or informative_execution_result is None:
                             informative_execution_result = result
                         state_changed = state_changed or bool(result.updated_datasets)
+                        artifacts_for_message.extend(result.artifacts)
                         for artifact in result.artifacts:
                             yield {
                                 "type": "artifact_created",
@@ -377,34 +488,106 @@ class CodingAgent:
                         else:
                             failed_execution_attempts = 0
 
-                        if not result.ok and failed_execution_attempts < MAX_EXECUTION_ATTEMPTS:
+                        deterministic = self.verifier.verify(
+                            user_message=request.message,
+                            execution_result=result,
+                            artifacts_created_this_turn=result.artifacts,
+                            all_artifacts_for_message=artifacts_for_message,
+                            current_step=step_index + 1,
+                            max_steps=max_steps,
+                            retries_remaining=(
+                                failed_execution_attempts < max_retries
+                                and verifier_retry_attempts < max_retries
+                            ),
+                            state_changed=state_changed,
+                            confirmation_status="approved" if request.confirmed else None,
+                            latest_code=code,
+                        )
+                        llm_verification, llm_trace = self.llm_verifier.verify_if_allowed(
+                            user_message=request.message,
+                            context=context,
+                            execution_result=result,
+                            artifacts=artifacts_for_message,
+                            state_changed=state_changed,
+                            latest_code=code,
+                            deterministic_result=deterministic,
+                            current_step=step_index + 1,
+                            turn_started_at=turn_started_at,
+                        )
+                        if llm_trace:
+                            yield {"type": "trace", "message": llm_trace}
+                        verification = merge_verification_results(
+                            deterministic,
+                            llm_verification,
+                            min_confidence=settings.llm_verifier_min_confidence,
+                        )
+                        yield {
+                            "type": "verifier_result",
+                            "message": verifier_trace_message(verification),
+                            "passed": verification.passed,
+                            "severity": verification.severity,
+                            "source": verification.source,
+                            "reasons": verification.reasons,
+                        }
+
+                        if verification.severity == "retry" and (
+                            failed_execution_attempts < max_retries
+                            and verifier_retry_attempts < max_retries
+                        ):
+                            verifier_retry_attempts += 1
+                            verifier_feedback = verification.retry_instruction
+                            if not result.ok:
+                                yield {
+                                    "type": "trace",
+                                    "message": "The Python attempt failed; retrying with the traceback context...",
+                                }
                             yield {
                                 "type": "trace",
-                                "message": "The Python attempt failed; retrying with the traceback context...",
+                                "message": verifier_trace_message(verification),
                             }
-                        elif not result.ok:
+                            input_items.append(
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": tool_call.id,
+                                    "output": json.dumps(
+                                        {
+                                            **tool_execution.output,
+                                            "verifier": verification.model_dump(mode="json"),
+                                        },
+                                        default=str,
+                                    ),
+                                }
+                            )
+                            continue
+
+                        if verification.severity == "fail" or not result.ok:
                             yield {
                                 "type": "trace",
-                                "message": "The Python attempts failed; preparing a concise explanation...",
+                                "message": "Verifier could not approve the result; composing a clear explanation...",
                             }
-                            yield {
-                                "type": "final_answer",
-                                "answer": _fallback_answer_from_execution(result),
-                                "state_changed": state_changed,
-                            }
+                            answer = self.response_composer.compose_failure(
+                                execution_result=result,
+                                verification=verification,
+                                state_changed=state_changed,
+                            )
+                            yield composed_answer_event(answer)
                             yield {"type": "message_done"}
                             return
 
-                        if _should_finalize_after_execution(request.message, result):
+                        if verification.should_finalize or verification.passed:
                             yield {
                                 "type": "trace",
-                                "message": "Found enough information; preparing final answer...",
+                                "message": "Found enough information; verified result; composing final answer...",
                             }
-                            yield {
-                                "type": "final_answer",
-                                "answer": _answer_from_useful_execution(result),
-                                "state_changed": state_changed,
-                            }
+                            answer = self.response_composer.compose(
+                                user_message=request.message,
+                                execution_result=result,
+                                artifacts=artifacts_for_message,
+                                verification=verification,
+                                state_changed=state_changed,
+                                mutation_summary=arguments.get("mutation_summary"),
+                            )
+                            yield composed_answer_event(answer)
                             yield {"type": "message_done"}
                             return
 
@@ -412,7 +595,13 @@ class CodingAgent:
                             {
                                 "type": "function_call_output",
                                 "call_id": tool_call.id,
-                                "output": json.dumps(tool_execution.output, default=str),
+                                "output": json.dumps(
+                                    {
+                                        **tool_execution.output,
+                                        "verifier": verification.model_dump(mode="json"),
+                                    },
+                                    default=str,
+                                ),
                             }
                         )
                     elif tool_call.name == "request_confirmation":
@@ -461,22 +650,68 @@ class CodingAgent:
                         return
                     elif tool_call.name == "final_answer":
                         answer = str(arguments.get("answer", ""))
-                        yield {
-                            "type": "final_answer",
-                            "answer": answer,
-                            "state_changed": bool(arguments.get("state_changed", False)) or state_changed,
-                        }
+                        verification = self.verifier.verify(
+                            user_message=request.message,
+                            execution_result=informative_execution_result or last_execution_result,
+                            artifacts_created_this_turn=[],
+                            all_artifacts_for_message=artifacts_for_message,
+                            current_step=step_index + 1,
+                            max_steps=max_steps,
+                            retries_remaining=verifier_retry_attempts < max_retries,
+                            state_changed=bool(arguments.get("state_changed", False)) or state_changed,
+                            final_answer_draft=answer,
+                        )
+                        if verification.severity == "retry" and verifier_retry_attempts < max_retries:
+                            verifier_retry_attempts += 1
+                            verifier_feedback = verification.retry_instruction
+                            yield {"type": "trace", "message": verifier_trace_message(verification)}
+                            input_items.append(
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": tool_call.id,
+                                    "output": json.dumps({"verifier": verification.model_dump(mode="json")}),
+                                }
+                            )
+                            continue
+
+                        composed = self.response_composer.compose(
+                            user_message=request.message,
+                            execution_result=informative_execution_result or last_execution_result,
+                            artifacts=artifacts_for_message,
+                            verification=verification,
+                            state_changed=bool(arguments.get("state_changed", False)) or state_changed,
+                            mutation_summary=None,
+                        )
+                        if answer and not artifacts_for_message and informative_execution_result is None:
+                            composed.markdown = answer
+                        yield composed_answer_event(composed)
                         yield {"type": "message_done"}
                         return
 
                 continue
 
             if model_response.final_text:
-                yield {
-                    "type": "final_answer",
-                    "answer": model_response.final_text,
-                    "state_changed": state_changed,
-                }
+                verification = self.verifier.verify(
+                    user_message=request.message,
+                    execution_result=informative_execution_result or last_execution_result,
+                    artifacts_created_this_turn=[],
+                    all_artifacts_for_message=artifacts_for_message,
+                    current_step=step_index + 1,
+                    max_steps=max_steps,
+                    retries_remaining=False,
+                    state_changed=state_changed,
+                    final_answer_draft=model_response.final_text,
+                )
+                composed = self.response_composer.compose(
+                    user_message=request.message,
+                    execution_result=informative_execution_result or last_execution_result,
+                    artifacts=artifacts_for_message,
+                    verification=verification,
+                    state_changed=state_changed,
+                )
+                if not artifacts_for_message and informative_execution_result is None:
+                    composed.markdown = model_response.final_text
+                yield composed_answer_event(composed)
                 yield {"type": "message_done"}
                 return
 
@@ -488,14 +723,42 @@ class CodingAgent:
             "type": "trace",
             "message": "The agent reached its internal step budget; summarizing the latest execution instead...",
         }
-        yield {
-            "type": "final_answer",
-            "answer": _fallback_answer_from_execution(
-                informative_execution_result or last_execution_result,
-                step_limited=True,
-            ),
-            "state_changed": state_changed,
-        }
+        verification = self.verifier.verify(
+            user_message=request.message,
+            execution_result=informative_execution_result or last_execution_result,
+            artifacts_created_this_turn=[],
+            all_artifacts_for_message=artifacts_for_message,
+            current_step=max_steps,
+            max_steps=max_steps,
+            retries_remaining=False,
+            state_changed=state_changed,
+        )
+        verification = verification.model_copy(
+            update={
+                "severity": "finalize_with_warning" if informative_execution_result or artifacts_for_message else "fail",
+                "should_finalize": bool(informative_execution_result or artifacts_for_message),
+                "reasons": [
+                    "Step budget reached; using the best verified result available."
+                    if informative_execution_result or artifacts_for_message
+                    else "Step budget reached before a useful result was available."
+                ],
+            }
+        )
+        if informative_execution_result or artifacts_for_message:
+            answer = self.response_composer.compose(
+                user_message=request.message,
+                execution_result=informative_execution_result or last_execution_result,
+                artifacts=artifacts_for_message,
+                verification=verification,
+                state_changed=state_changed,
+            )
+        else:
+            answer = self.response_composer.compose_failure(
+                execution_result=last_execution_result,
+                verification=verification,
+                state_changed=state_changed,
+            )
+        yield composed_answer_event(answer)
         yield {"type": "message_done"}
 
     def _create_pending_confirmation(
@@ -914,6 +1177,21 @@ def _active_dataset(datasets: Sequence[Dataset], active_dataset_id: str | None) 
     return next((dataset for dataset in datasets if dataset.id == active_dataset_id), None)
 
 
+def _clarification_for_ambiguous_destructive_request(message: str) -> str | None:
+    lowered = message.lower()
+    if "most important identifier" in lowered:
+        return (
+            "I need one clarification before changing data: which identifier field should define "
+            "the missing-value drop?\n\n**State changed:** No"
+        )
+    if any(phrase in lowered for phrase in ("clean this dataset", "remove bad records", "fix the data")):
+        return (
+            "I need one clarification before changing data: what exact rule should I use to decide "
+            "which records or fields are bad?\n\n**State changed:** No"
+        )
+    return None
+
+
 def _version_summary(version: VersionNode | None) -> dict[str, Any] | None:
     if version is None:
         return None
@@ -1150,6 +1428,42 @@ def _fake_chart_code() -> str:
             "    rows = [{'name': key, 'size': len(value) if hasattr(value, '__len__') else 1} for key, value in datasets.items()]",
             "    save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': 'name', 'y': 'size', 'description': 'Dataset sizes'})",
             "    preview(rows)",
+        ]
+    )
+
+
+def _fake_table_code() -> str:
+    return "\n".join(
+        [
+            "df = to_dataframe(data, limit=500)",
+            "if 'country' in df.columns:",
+            "    rows = df['country'].astype(str).value_counts().head(10).reset_index()",
+            "    rows.columns = ['country', 'record_count']",
+            "    save_table('Top countries', rows, description='Records by country')",
+            "    preview({'columns': list(rows.columns), 'rows': rows.to_dict('records')})",
+            "else:",
+            "    preview_df = df.head(5)",
+            "    save_table('Tabular preview', preview_df, description='First rows converted with generic helpers')",
+            "    preview({'columns': list(df.columns), 'rows': preview_df.to_dict('records')})",
+        ]
+    )
+
+
+def _fake_schema_code() -> str:
+    return "\n".join(
+        [
+            "df = to_dataframe(data, limit=100)",
+            "records = df.head(20).to_dict('records')",
+            "schema = {'scalar_fields': [], 'date_fields': [], 'list_like_fields': []}",
+            "for column in df.columns:",
+            "    sample = next((row.get(column) for row in records if row.get(column) is not None), None)",
+            "    if isinstance(sample, list):",
+            "        schema['list_like_fields'].append(str(column))",
+            "    elif hasattr(sample, 'isoformat') or 'date' in str(column).lower():",
+            "        schema['date_fields'].append(str(column))",
+            "    else:",
+            "        schema['scalar_fields'].append(str(column))",
+            "RESULT = schema",
         ]
     )
 

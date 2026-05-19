@@ -183,7 +183,15 @@ function AssistantMessage({
               </span>
             ) : null}
           </div>
-          <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-700">{message.finalAnswer}</p>
+          {message.highlights?.length ? <HighlightChips highlights={message.highlights} /> : null}
+          <AnswerMarkdown markdown={message.finalAnswer} />
+          {message.warnings?.length ? (
+            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs font-semibold text-amber-900">
+              {message.warnings.map((warning) => (
+                <p key={warning}>{warning}</p>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -543,10 +551,84 @@ function traceSummary(item?: ChatTraceEvent) {
   if (item.type === "confirmation_required") {
     return "Confirmation required";
   }
+  if (item.type === "verifier_result") {
+    return item.message ?? "Verifier checked result";
+  }
   if (item.type === "error") {
     return "Error";
   }
   return item.type;
+}
+
+function HighlightChips({ highlights }: { highlights: Array<Record<string, unknown>> }) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {highlights.slice(0, 6).map((item, index) => (
+        <span
+          key={`${String(item.label)}-${index}`}
+          className="rounded-full border border-teal-100 bg-teal-50 px-2.5 py-1 text-[11px] font-bold text-teal-900"
+        >
+          {String(item.label ?? "Metric")}: {String(item.value ?? "")}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function AnswerMarkdown({ markdown }: { markdown: string }) {
+  const lines = markdown.split("\n");
+  return (
+    <div className="mt-3 space-y-2 text-sm leading-6 text-slate-700">
+      {lines.map((line, index) => {
+        if (!line.trim()) {
+          return <div key={index} className="h-1" />;
+        }
+        if (line.startsWith("### ")) {
+          return (
+            <h4 key={index} className="pt-2 text-sm font-bold text-slate-900">
+              {inlineMarkdown(line.slice(4))}
+            </h4>
+          );
+        }
+        if (line.startsWith("## ")) {
+          return (
+            <h3 key={index} className="text-base font-bold text-slate-950">
+              {inlineMarkdown(line.slice(3))}
+            </h3>
+          );
+        }
+        if (line.startsWith("- ")) {
+          return (
+            <div key={index} className="flex gap-2">
+              <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-teal-600" />
+              <span>{inlineMarkdown(line.slice(2))}</span>
+            </div>
+          );
+        }
+        if (line.startsWith("```")) {
+          return null;
+        }
+        return <p key={index}>{inlineMarkdown(line)}</p>;
+      })}
+    </div>
+  );
+}
+
+function inlineMarkdown(text: string) {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return (
+        <code key={index} className="rounded bg-slate-100 px-1 py-0.5 text-[0.9em] font-semibold text-slate-800">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part;
+  });
 }
 
 type AgentProgress = {
@@ -583,6 +665,12 @@ function agentProgress(message: ChatMessage): AgentProgress {
     if (item.type === "confirmation_required") {
       value = Math.max(value, 70);
       label = "Waiting for confirmation...";
+      return;
+    }
+
+    if (item.type === "verifier_result") {
+      value = Math.max(value, 78);
+      label = item.message || "Verifying result...";
       return;
     }
 

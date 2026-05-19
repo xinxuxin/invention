@@ -36,6 +36,41 @@ data types.
 
 ## Architecture
 
+The backend now runs a multi-role workflow while keeping the product a single general-purpose
+Python coding agent, not a collection of specialized analytics agents:
+
+```text
+User
+ ↓
+Frontend Chat UI
+ ↓
+FastAPI Chat Stream
+ ↓
+AgentOrchestrator
+ ↓
+CodingAgent
+ ↓
+PythonExecutor
+ ↓
+ResultVerifier
+ ├─ Deterministic rules
+ └─ Optional LLM verifier with fallback
+ ↓
+ResponseComposer
+ ↓
+Inline Table / Chart / CSV Artifacts
+```
+
+The verifier does not turn this into a fixed analytics router. It only checks whether the general
+coding agent satisfied the user's request: for example, whether a requested table/chart/CSV artifact
+exists, whether wrapper columns leaked into a table, whether a non-mutating request accidentally
+changed state, or whether a useful result should be finalized instead of burning the step budget.
+
+If the optional LLM verifier is enabled, it checks semantic completeness from execution summaries and
+artifact metadata only. It does not call Python, does not invent data, and cannot override
+deterministic hard-rule failures. If it is missing, slow, rate-limited, invalid, or too expensive,
+the deterministic verifier is used so demos keep moving.
+
 ```text
 React + Vite + TypeScript
   - upload/dropzone, chat, trace stream, Explore view, inspector, artifacts, branch timeline
@@ -50,9 +85,13 @@ FastAPI
   - filesystem storage under backend/.data/
 
 Agent
-  - tiny tool surface: execute_python, final_answer, request_confirmation
-  - writes Python to inspect arbitrary data
-  - observes execution output and retries failed code up to 3 attempts
+  - AgentOrchestrator owns the turn loop, streaming, confirmations, verification, and finalization
+  - CodingAgent has the tiny tool surface: execute_python, final_answer, request_confirmation
+  - CodingAgent writes Python to inspect arbitrary data
+  - ResultVerifier checks artifacts, state behavior, known bad patterns, and retry/finalize policy
+  - optional LLM verifier checks semantic completeness with deterministic fallback
+  - ResponseComposer creates concise markdown answers with highlights and artifact references
+  - observes execution output and retries failed or incomplete code up to the configured limit
   - asks clarification questions for ambiguous destructive choices
   - requests confirmation before dangerous writes
 
@@ -95,6 +134,14 @@ Important variables:
 OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-4.1
 AGENT_MODEL_MODE=openai
+AGENT_MAX_STEPS=6
+AGENT_MAX_RETRIES=3
+VERIFIER_MODE=hybrid
+LLM_VERIFIER_ENABLED=true
+LLM_VERIFIER_MODEL=gpt-4.1-mini
+LLM_VERIFIER_TIMEOUT_SECONDS=6
+LLM_VERIFIER_MAX_TOKENS=700
+LLM_VERIFIER_FAIL_OPEN=true
 DATABASE_URL=sqlite:///./data_analysis_agent.db
 STORAGE_DIR=.data
 BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
@@ -282,6 +329,20 @@ Run tests:
 cd backend
 pytest
 ```
+
+Run the optional end-to-end demo evaluator against a running backend:
+
+```bash
+cd backend
+python scripts/evaluate_agent_demo.py \
+  --quick \
+  --dataset "$E2E_SOFTBANK_PKL_PATH" \
+  --base-url http://localhost:8000
+```
+
+The evaluator creates a session, uploads the dataset, sends streamed chat questions, checks final
+answers and artifacts, then writes `report.json` and `report.md`. It does not require the optional
+LLM verifier unless your environment enables it.
 
 The suite covers upload/introspection, chat, mutation persistence, rollback, fork, CSV export after
 mutation, chart artifact creation, multi-dataset comparison, executor retry recovery, confirmation,

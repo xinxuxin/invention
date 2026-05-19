@@ -209,3 +209,11 @@
 - Updated `save_chart()` artifact metadata and prompt contract so chart/plot/visualization requests produce structured chart artifacts and optional underlying table artifacts.
 - Updated chat rendering so generated artifacts appear inline below the final answer, while the right artifact panel remains available.
 - Rebuilt artifact cards with TanStack Table previews, sticky headers, row/type badges, compact list/object cells, CSV download buttons, Recharts charts, and collapsed JSON previews.
+- Started multi-role workflow refactor while preserving the minimal external tool surface (`execute_python`, `final_answer`, `request_confirmation`).
+- Added configuration switches for orchestrator step/retry limits, deterministic/hybrid/LLM verifier modes, LLM verifier timeout/token/input budgets, fail-open fallback, and frontend artifact limits.
+- Added agent type models for actions, artifact references, verification results, LLM verifier results, and composed answers.
+- Added deterministic result verifier rules for missing table/chart/CSV artifacts, wrapper columns, stringified list/date fields, helper import mistakes, unsafe state changes, retry/finalize decisions, and step-budget prevention.
+- Added optional LLM verifier module with strict JSON verification, timeout/failure fallback to deterministic checks, and hard-rule authority for missing artifacts/wrapper columns.
+- Added response composer that turns verified execution output into concise markdown with highlights, key findings, warnings, artifact references, and explicit state-change status.
+- Wired the chat loop to run verification after Python execution, stream verifier trace events, retry with verifier feedback when artifacts are missing, and compose final answers from verified results instead of dumping large JSON.
+- Added frontend support for final-answer highlight chips, warning callouts, simple markdown rendering, and verifier trace progress labels.

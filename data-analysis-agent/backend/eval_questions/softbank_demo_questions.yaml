@@ -1,0 +1,32 @@
+questions:
+  - id: inspect
+    prompt: "What is in this file? Please inspect the object type, size, structure, and show a few representative examples."
+    expects:
+      - no_step_budget
+      - mentions_patent_metadata
+      - state_changed_false
+  - id: tabular_preview
+    prompt: "Convert this dataset into a tabular preview if possible. Show the inferred columns and the first 5 rows."
+    expects:
+      - table_artifact
+      - no_wrapper_columns
+      - state_changed_false
+  - id: schema
+    prompt: "Summarize the schema of this patent metadata dataset. Which fields are scalar fields, which are dates, and which are list-like fields?"
+    expects:
+      - schema_terms
+      - no_step_budget
+  - id: top_countries
+    prompt: "Show the top countries by number of patent records. Return both a table and a short explanation."
+    expects:
+      - table_artifact
+      - state_changed_false
+  - id: country_chart
+    prompt: "Create a bar chart showing the number of patent records by country."
+    expects:
+      - chart_artifact
+  - id: export_top5
+    prompt: "Export that top-5 table as CSV, but do not change the working dataset."
+    expects:
+      - csv_artifact
+      - state_changed_false

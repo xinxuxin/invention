@@ -11,6 +11,23 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1"
     agent_model_mode: str = "openai"
+    agent_max_steps: int = 6
+    agent_max_retries: int = 3
+    verifier_mode: str = "hybrid"
+    llm_verifier_enabled: bool = True
+    llm_verifier_model: str = "gpt-4.1-mini"
+    llm_verifier_timeout_seconds: int = 6
+    llm_verifier_max_tokens: int = 700
+    llm_verifier_max_input_chars: int = 12_000
+    llm_verifier_min_confidence: float = 0.70
+    llm_verifier_fail_open: bool = True
+    llm_verifier_hard_rule_authority: bool = False
+    verifier_time_budget_per_turn_seconds: int = 8
+    verifier_skip_llm_after_step: int = 4
+    frontend_inline_table_max_rows: int = 50
+    frontend_inline_table_max_columns: int = 30
+    frontend_cell_max_chars: int = 200
+    frontend_chart_max_points: int = 500
     backend_cors_origins: list[AnyHttpUrl] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )

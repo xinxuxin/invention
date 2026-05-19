@@ -166,9 +166,9 @@ def test_agent_summarizes_latest_execution_after_step_limit(client: TestClient) 
     events = _parse_sse(response.text)
 
     assert response.status_code == 200
-    assert len([event for event in events if event["type"] == "code_result_summary"]) == MAX_AGENT_STEPS
+    assert len([event for event in events if event["type"] == "code_result_summary"]) == 1
     assert events[-2]["type"] == "final_answer"
-    assert "step budget" in events[-2]["answer"]
+    assert "step budget" not in events[-2]["answer"].lower()
     assert "useful step" in events[-2]["answer"]
     assert not any(event["type"] == "error" and "step limit" in event["message"] for event in events)
 
@@ -616,6 +616,43 @@ def test_table_prompt_streams_inline_artifact_from_result_preview(client: TestCl
     assert artifact_events[0]["artifact"]["kind"] == "table"
     assert events[-2]["type"] == "final_answer"
     assert "shown in the chat" in events[-2]["answer"]
+
+
+def test_verifier_retries_when_table_artifact_missing(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response("execute_python", {"code": "RESULT = {'summary': 'I saw rows but made no table'}"}),
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "df = to_dataframe(data)",
+                            "save_table('Verified preview', df.head(5))",
+                            "RESULT = {'columns': list(df.columns), 'rows': df.head(5).to_dict('records')}",
+                        ]
+                    )
+                },
+            ),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Show the first 5 rows as a table", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    assert response.status_code == 200
+    assert len([event for event in events if event["type"] == "code_result_summary"]) == 2
+    assert any(
+        event["type"] == "verifier_result" and event["severity"] == "retry"
+        for event in events
+    )
+    assert any(event["type"] == "artifact_created" and event["artifact"]["kind"] == "table" for event in events)
+    assert events[-2]["type"] == "final_answer"
 
 
 def test_agent_stops_after_useful_inspection_result(client: TestClient) -> None:
