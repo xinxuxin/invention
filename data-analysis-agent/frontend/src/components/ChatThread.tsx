@@ -8,6 +8,7 @@ import {
   Code2,
   Loader2,
   MessageSquare,
+  ShieldCheck,
   Sparkles,
   TerminalSquare,
   UserRound,
@@ -259,11 +260,22 @@ function ConfirmationCard({
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-bold text-amber-950">Confirmation required</p>
+          <span className="mt-2 inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-emerald-800">
+            <ShieldCheck className="h-3 w-3" />
+            Safe mode
+          </span>
           <p className="mt-2 text-sm leading-6 text-amber-950/80">{pending.message}</p>
           <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
-            <RiskMetric label="Risk level" value="High" />
-            <RiskMetric label="Operation" value={pending.mutationSummary ?? "Mutation"} />
-            <RiskMetric label="State change" value="Pending" />
+            <RiskMetric label="Risk level" value={formatRisk(pending.riskLevel)} />
+            <RiskMetric label="Operation" value={pending.operationSummary ?? pending.mutationSummary ?? "Mutation"} />
+            <RiskMetric
+              label="Affected data"
+              value={
+                pending.affectedDatasetIds?.length
+                  ? `${pending.affectedDatasetIds.length} dataset${pending.affectedDatasetIds.length === 1 ? "" : "s"}`
+                  : "Current dataset"
+              }
+            />
           </div>
           {pending.code ? (
             <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 text-xs text-slate-100">
@@ -271,7 +283,7 @@ function ConfirmationCard({
             </pre>
           ) : null}
           <div className="mt-4 flex gap-2">
-            <Button onClick={onConfirm}>Confirm</Button>
+            <Button onClick={onConfirm}>Apply change</Button>
             <Button variant="secondary" onClick={onCancel}>
               Cancel
             </Button>
@@ -280,6 +292,13 @@ function ConfirmationCard({
       </div>
     </div>
   );
+}
+
+function formatRisk(risk?: string | null) {
+  if (!risk) {
+    return "Medium";
+  }
+  return risk.charAt(0).toUpperCase() + risk.slice(1);
 }
 
 function RiskMetric({ label, value }: { label: string; value: string }) {

@@ -4,6 +4,7 @@ import type {
   BranchListResponse,
   ChatStreamEvent,
   ChatStreamRequest,
+  ConfirmationActionResponse,
   DatasetListResponse,
   DatasetUploadResponse,
   ExecutionArtifact,
@@ -176,6 +177,26 @@ export async function streamChat(
   if (buffer.trim()) {
     parseSseBlock(buffer, onEvent);
   }
+}
+
+export async function approveConfirmation(
+  sessionId: string,
+  confirmationId: string,
+): Promise<ConfirmationActionResponse> {
+  return request<ConfirmationActionResponse>(
+    `/api/sessions/${sessionId}/confirmations/${confirmationId}/approve`,
+    { method: "POST" },
+  );
+}
+
+export async function rejectConfirmation(
+  sessionId: string,
+  confirmationId: string,
+): Promise<ConfirmationActionResponse> {
+  return request<ConfirmationActionResponse>(
+    `/api/sessions/${sessionId}/confirmations/${confirmationId}/reject`,
+    { method: "POST" },
+  );
 }
 
 export async function getArtifactContent(

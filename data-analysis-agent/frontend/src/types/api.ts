@@ -153,9 +153,13 @@ export type ChatStreamEvent =
     }
   | {
       type: "confirmation_required";
+      confirmation_id?: string | null;
       message: string;
       code?: string | null;
       mutation_summary?: string | null;
+      operation_summary?: string | null;
+      risk_level?: "low" | "medium" | "high" | string;
+      affected_dataset_ids?: string[];
     }
   | { type: "artifact_created"; artifact: ExecutionArtifact }
   | { type: "final_answer"; answer: string; state_changed?: boolean }
@@ -168,4 +172,24 @@ export type ChatStreamRequest = {
   branch_name?: string;
   conversation_history?: ChatHistoryMessage[];
   confirmed?: boolean;
+};
+
+export type ConfirmationRead = {
+  id: string;
+  session_id: string;
+  proposed_code: string;
+  operation_summary: string;
+  affected_dataset_ids: string[];
+  risk_level: "low" | "medium" | "high" | string;
+  status: "pending" | "approved" | "rejected" | "failed" | string;
+  active_dataset_id?: string | null;
+  branch_name: string;
+  created_at: string;
+  resolved_at?: string | null;
+};
+
+export type ConfirmationActionResponse = {
+  confirmation: ConfirmationRead;
+  events: ChatStreamEvent[];
+  result?: Record<string, unknown> | null;
 };

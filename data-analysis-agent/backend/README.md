@@ -88,6 +88,11 @@ available artifacts. It streams public trace events only, executes Python throug
 observes results, retries failed Python attempts up to three times, requests confirmation before
 destructive mutations, and emits final answers separately from trace events.
 
+Risky write operations create durable pending confirmations that can be approved or rejected via
+`POST /api/sessions/{session_id}/confirmations/{confirmation_id}/approve` and
+`POST /api/sessions/{session_id}/confirmations/{confirmation_id}/reject`. Approved mutations record
+the confirmation id on the created version node; rejected mutations leave snapshots unchanged.
+
 The agent prompt receives recent branch/history context, and the backend handles clear history
 requests such as rollback, checkout, fork, compare-to-main, and "what changed" without adding fixed
 analytics tools.
@@ -110,4 +115,3 @@ The Python executor is not a secure sandbox. It runs in a child process with tim
 ## Planned Areas
 
 - Deeper visual diffing between arbitrary branch states
-- More granular confirmation UX for multi-dataset mutations

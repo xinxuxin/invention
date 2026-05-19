@@ -132,10 +132,142 @@ def test_destructive_mutation_requires_confirmation(client: TestClient) -> None:
         json={"message": "Drop the value column", "active_dataset_id": dataset_id},
     )
     events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
 
-    assert any(event["type"] == "confirmation_required" for event in events)
+    assert confirmation["confirmation_id"]
+    assert confirmation["risk_level"] == "high"
+    assert confirmation["affected_dataset_ids"] == [dataset_id]
     assert not any(event["type"] == "code_result_summary" for event in events)
     assert events[-1]["type"] == "message_done"
+
+
+def test_approving_pending_confirmation_executes_and_versions_dataset(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "data.drop(columns=['value'], inplace=True)\npreview(data)",
+                    "mutates_state": True,
+                    "mutation_summary": "Drop value column",
+                },
+            ),
+            _tool_response(
+                "final_answer",
+                {"answer": "Dropped the value column and saved a new version.", "state_changed": True},
+            ),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Drop the value column", "active_dataset_id": dataset_id},
+    )
+    confirmation = next(event for event in _parse_sse(response.text) if event["type"] == "confirmation_required")
+
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+    payload = approve_response.json()
+    events = payload["events"]
+    result_event = next(event for event in events if event["type"] == "code_result_summary")
+
+    assert approve_response.status_code == 200
+    assert payload["confirmation"]["status"] == "approved"
+    assert result_event["ok"] is True
+    assert len(result_event["updated_datasets"]) == 1
+    assert events[-2]["type"] == "final_answer"
+    assert events[-2]["state_changed"] is True
+
+    history_response = client.get(f"/api/sessions/{session_id}/history")
+    versions = [item for item in history_response.json()["versions"] if item["dataset_id"] == dataset_id]
+    assert len(versions) == 2
+    assert versions[-1]["created_by_message_id"] == confirmation["confirmation_id"]
+
+
+def test_rejecting_pending_confirmation_does_not_mutate_dataset(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "data.drop(columns=['value'], inplace=True)\npreview(data)",
+                    "mutates_state": True,
+                    "mutation_summary": "Drop value column",
+                },
+            )
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Drop the value column", "active_dataset_id": dataset_id},
+    )
+    confirmation = next(event for event in _parse_sse(response.text) if event["type"] == "confirmation_required")
+
+    reject_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/reject",
+    )
+    payload = reject_response.json()
+
+    assert reject_response.status_code == 200
+    assert payload["confirmation"]["status"] == "rejected"
+    assert payload["events"][0]["type"] == "final_answer"
+    assert payload["events"][0]["state_changed"] is False
+
+    history_response = client.get(f"/api/sessions/{session_id}/history")
+    versions = [item for item in history_response.json()["versions"] if item["dataset_id"] == dataset_id]
+    assert len(versions) == 1
+
+
+def test_chat_rollback_requires_confirmation_and_approval_creates_version(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "data['double'] = data['value'] * 2\npreview(data)",
+                    "mutates_state": True,
+                    "mutation_summary": "Add double column",
+                },
+            ),
+            _tool_response("final_answer", {"answer": "Added a double column.", "state_changed": True}),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+    mutation_response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Add a double column", "active_dataset_id": dataset_id, "confirmed": True},
+    )
+    assert mutation_response.status_code == 200
+
+    rollback_response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "rollback one step", "active_dataset_id": dataset_id},
+    )
+    confirmation = next(
+        event for event in _parse_sse(rollback_response.text) if event["type"] == "confirmation_required"
+    )
+
+    assert confirmation["risk_level"] == "high"
+    assert confirmation["affected_dataset_ids"] == [dataset_id]
+
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+    assert approve_response.status_code == 200
+    assert approve_response.json()["confirmation"]["status"] == "approved"
+
+    history_response = client.get(f"/api/sessions/{session_id}/history")
+    versions = [item for item in history_response.json()["versions"] if item["dataset_id"] == dataset_id]
+    assert len(versions) == 3
+    assert versions[-1]["created_by_message_id"] == confirmation["confirmation_id"]
+    assert versions[-1]["mutation_summary"].startswith("Rollback to:")
 
 
 def test_confirmed_mutation_runs_and_reports_state_change(client: TestClient) -> None:

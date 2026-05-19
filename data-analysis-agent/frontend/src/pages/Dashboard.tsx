@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { motion } from "framer-motion";
 import {
   Activity,
@@ -9,6 +10,7 @@ import {
   Loader2,
   MessageSquareText,
   PanelRight,
+  ShieldCheck,
   Sparkles,
   Upload,
 } from "lucide-react";
@@ -73,6 +75,11 @@ export function Dashboard() {
                     ? "loading"
                     : "warn"
               }
+            />
+            <StatusPill
+              label="Safe mode on"
+              status="ok"
+              icon={<ShieldCheck className="h-3.5 w-3.5 text-emerald-700" />}
             />
             <Button variant="secondary" disabled={!workspace.session}>
               <Upload className="h-4 w-4" />
@@ -376,7 +383,15 @@ export function Dashboard() {
   );
 }
 
-function StatusPill({ label, status }: { label: string; status: "ok" | "loading" | "warn" }) {
+function StatusPill({
+  label,
+  status,
+  icon,
+}: {
+  label: string;
+  status: "ok" | "loading" | "warn";
+  icon?: ReactNode;
+}) {
   return (
     <div className="flex h-10 items-center gap-2 rounded-md border border-border bg-white/78 px-3 text-sm font-medium">
       <span
@@ -384,6 +399,7 @@ function StatusPill({ label, status }: { label: string; status: "ok" | "loading"
           status === "ok" ? "bg-emerald-500" : status === "loading" ? "bg-amber-500" : "bg-rose-500"
         }`}
       />
+      {icon}
       {label}
     </div>
   );

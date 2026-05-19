@@ -10,9 +10,9 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.agent.prompts import SYSTEM_PROMPT, build_context_prompt
-from app.agent.tools import AGENT_TOOLS, AgentToolRunner, looks_destructive, parse_tool_arguments
+from app.agent.tools import AGENT_TOOLS, AgentToolRunner, looks_destructive, parse_tool_arguments, risk_level_for_code
 from app.core.config import get_settings
-from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode, new_id, utc_now
+from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
 from app.runtime.python_executor import PythonExecutor
 from app.services.versioning import (
     active_branch,
@@ -198,11 +198,23 @@ class CodingAgent:
                             and looks_destructive(code)
                             and not request.confirmed
                         ):
+                            confirmation = self._create_pending_confirmation(
+                                session_id=session_id,
+                                request=request,
+                                code=code,
+                                tool_arguments=arguments,
+                                input_items=input_items,
+                                tool_call_id=tool_call.id,
+                            )
                             yield {
                                 "type": "confirmation_required",
+                                "confirmation_id": confirmation.id,
                                 "message": "This request appears to mutate or remove data. Please confirm before I run it.",
                                 "code": code,
-                                "mutation_summary": arguments.get("mutation_summary"),
+                                "mutation_summary": confirmation.operation_summary,
+                                "operation_summary": confirmation.operation_summary,
+                                "risk_level": confirmation.risk_level,
+                                "affected_dataset_ids": confirmation.affected_dataset_ids,
                             }
                             yield {"type": "message_done"}
                             return
@@ -258,11 +270,39 @@ class CodingAgent:
                             }
                         )
                     elif tool_call.name == "request_confirmation":
+                        code = arguments.get("code")
+                        confirmation = None
+                        if code:
+                            confirmation = self._create_pending_confirmation(
+                                session_id=session_id,
+                                request=request,
+                                code=str(code),
+                                tool_arguments={
+                                    "code": str(code),
+                                    "mutates_state": True,
+                                    "mutation_summary": arguments.get("mutation_summary")
+                                    or arguments.get("message"),
+                                },
+                                input_items=input_items,
+                                tool_call_id=tool_call.id,
+                            )
                         yield {
                             "type": "confirmation_required",
+                            "confirmation_id": confirmation.id if confirmation else None,
                             "message": str(arguments.get("message", "Please confirm this mutation.")),
-                            "code": arguments.get("code"),
-                            "mutation_summary": arguments.get("mutation_summary"),
+                            "code": code,
+                            "mutation_summary": (
+                                confirmation.operation_summary
+                                if confirmation
+                                else arguments.get("mutation_summary")
+                            ),
+                            "operation_summary": (
+                                confirmation.operation_summary
+                                if confirmation
+                                else arguments.get("mutation_summary")
+                            ),
+                            "risk_level": confirmation.risk_level if confirmation else "medium",
+                            "affected_dataset_ids": confirmation.affected_dataset_ids if confirmation else [],
                         }
                         input_items.append(
                             {
@@ -300,6 +340,65 @@ class CodingAgent:
 
         yield {"type": "error", "message": "Agent stopped after reaching the step limit."}
         yield {"type": "message_done"}
+
+    def _create_pending_confirmation(
+        self,
+        *,
+        session_id: str,
+        request: ChatStreamRequest,
+        code: str,
+        tool_arguments: dict[str, Any],
+        input_items: list[dict[str, Any]],
+        tool_call_id: str,
+    ) -> PendingConfirmation:
+        operation_summary = str(
+            tool_arguments.get("mutation_summary")
+            or "Risky dataset mutation"
+        )
+        confirmation = PendingConfirmation(
+            session_id=session_id,
+            proposed_code=code,
+            operation_summary=operation_summary,
+            affected_dataset_ids=self._affected_dataset_ids(session_id, code, request.active_dataset_id),
+            risk_level=risk_level_for_code(code),
+            active_dataset_id=request.active_dataset_id,
+            branch_name=request.branch_name,
+            tool_arguments=tool_arguments,
+            model_input_items=input_items,
+            tool_call_id=tool_call_id,
+            original_message=request.message,
+        )
+        self.db.add(confirmation)
+        self.db.commit()
+        self.db.refresh(confirmation)
+        return confirmation
+
+    def _affected_dataset_ids(
+        self,
+        session_id: str,
+        code: str,
+        active_dataset_id: str | None,
+    ) -> list[str]:
+        session = self.db.get(AnalysisSession, session_id)
+        resolved_active_dataset_id = active_dataset_id or (session.active_dataset_id if session else None)
+        datasets = list(self.db.exec(select(Dataset).where(Dataset.session_id == session_id)).all())
+        lowered = code.lower()
+        affected: list[str] = []
+
+        for dataset in datasets:
+            key = dataset_key(dataset).lower()
+            if dataset.id.lower() in lowered or key in lowered:
+                affected.append(dataset.id)
+
+        if resolved_active_dataset_id and (
+            "data" in lowered or not affected
+        ):
+            affected.append(resolved_active_dataset_id)
+
+        if "datasets" in lowered and not affected:
+            affected.extend(dataset.id for dataset in datasets)
+
+        return list(dict.fromkeys(affected))
 
     def _initial_input_items(
         self,
@@ -503,6 +602,33 @@ class CodingAgent:
             target = self._version_for_rollback_request(branch, message)
             if target is None:
                 return [{"type": "error", "message": "There is no earlier version to roll back to."}]
+            if not request.confirmed:
+                confirmation = PendingConfirmation(
+                    session_id=session_id,
+                    proposed_code=f"# Rollback to version {target.id}",
+                    operation_summary=f"Rollback to: {target.mutation_summary or target.label}",
+                    affected_dataset_ids=[target.dataset_id],
+                    risk_level="high",
+                    active_dataset_id=target.dataset_id,
+                    branch_name=branch.name,
+                    tool_arguments={"operation_kind": "rollback", "version_id": target.id},
+                    original_message=request.message,
+                )
+                self.db.add(confirmation)
+                self.db.commit()
+                self.db.refresh(confirmation)
+                return [
+                    {
+                        "type": "confirmation_required",
+                        "confirmation_id": confirmation.id,
+                        "message": "Rolling back changes the active dataset state. Please confirm before I restore this version.",
+                        "code": confirmation.proposed_code,
+                        "mutation_summary": confirmation.operation_summary,
+                        "operation_summary": confirmation.operation_summary,
+                        "risk_level": confirmation.risk_level,
+                        "affected_dataset_ids": confirmation.affected_dataset_ids,
+                    }
+                ]
             current = self.db.get(VersionNode, branch.current_version_id) if branch.current_version_id else None
             rollback = self._copy_version(
                 source=target,

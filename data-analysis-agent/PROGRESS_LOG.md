@@ -105,3 +105,17 @@
 - Verified backend tests pass: `31 passed`.
 - Verified backend lint passes: `ruff check .`.
 - Verified frontend build passes: `npm run build`.
+- Started persisted risky-operation confirmation phase.
+- Added `PendingConfirmation` SQLModel storage for proposed code, operation summary, affected datasets, risk level, active dataset/branch context, model continuation context, status, and resolution timestamps.
+- Expanded destructive mutation detection to cover drops, drop-null/drop-duplicate flows, deletes, filtering assignments, overwrites, normalization, reshape/pivot/melt, and rollback language while still requiring `mutates_state=True`.
+- Updated the agent to create durable pending confirmations before risky mutations and stream `confirmation_required` with `confirmation_id`, risk level, affected dataset ids, proposed code, and operation summary.
+- Added confirmation approval/rejection endpoints; approval executes the stored code, attaches the confirmation id to created `VersionNode.created_by_message_id`, streams code/artifact/result/final events back to the frontend, and rejection resolves without mutating state.
+- Updated frontend chat confirmation flow to call approve/reject endpoints instead of replaying the user prompt, and to render risk, affected dataset count, safe mode badge, and Apply change/Cancel actions.
+- Added a persistent header safe-mode badge in the dashboard.
+- Added chat rollback confirmation so natural-language rollback requests pause before restoring prior state; approval saves the rollback as a new version with the confirmation id attached.
+- Updated backend README confirmation notes and removed the now-completed granular confirmation planned item.
+- Added backend tests for stored confirmation creation, approval creating a new version, rejection leaving history unchanged, and rollback approval creating a new version.
+- Browser smoke-tested the app shell after confirmation UI changes: title, chat workspace, and Safe mode badge render.
+- Verified backend tests pass: `34 passed`.
+- Verified backend lint passes: `ruff check .`.
+- Verified frontend build passes: `npm run build`.

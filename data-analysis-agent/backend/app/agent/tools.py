@@ -145,10 +145,53 @@ def parse_tool_arguments(raw_arguments: str | dict[str, Any] | None) -> dict[str
     return parsed if isinstance(parsed, dict) else {}
 
 
+def risk_level_for_code(code: str) -> str:
+    lowered = code.lower()
+    high_risk_markers = [
+        ".drop(",
+        ".dropna(",
+        "del ",
+        "delete",
+        "truncate",
+        "clear(",
+        "rollback",
+    ]
+    if any(marker in lowered for marker in high_risk_markers):
+        return "high"
+
+    medium_risk_markers = [
+        ".drop_duplicates(",
+        "drop_duplicates",
+        "dedup",
+        "deduplicate",
+        "remove(",
+        "pop(",
+        "overwrite",
+        "normalize",
+        "standardize",
+        "reshape",
+        "pivot",
+        "melt(",
+        ".query(",
+        "data = data[",
+        "data=data[",
+        "datasets[",
+    ]
+    if any(marker in lowered for marker in medium_risk_markers):
+        return "medium"
+
+    return "low"
+
+
 def looks_destructive(code: str) -> bool:
     lowered = code.lower()
     destructive_markers = [
         ".drop(",
+        ".dropna(",
+        ".drop_duplicates(",
+        "drop_duplicates",
+        "dedup",
+        "deduplicate",
         "del ",
         "remove(",
         "pop(",
@@ -156,5 +199,13 @@ def looks_destructive(code: str) -> bool:
         "delete",
         "truncate",
         "clear(",
+        "normalize",
+        "standardize",
+        "reshape",
+        "pivot",
+        "melt(",
+        ".query(",
+        "data = data[",
+        "data=data[",
     ]
     return any(marker in lowered for marker in destructive_markers)

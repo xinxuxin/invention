@@ -81,3 +81,23 @@ class Artifact(SQLModel, table=True):
     path: str
     artifact_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
+class PendingConfirmation(SQLModel, table=True):
+    __tablename__ = "pending_confirmations"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    session_id: str = Field(foreign_key="analysis_sessions.id", index=True)
+    proposed_code: str
+    operation_summary: str
+    affected_dataset_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    risk_level: str = Field(default="medium", index=True)
+    status: str = Field(default="pending", index=True)
+    active_dataset_id: str | None = Field(default=None, index=True)
+    branch_name: str = Field(default="main")
+    tool_arguments: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    model_input_items: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    tool_call_id: str | None = None
+    original_message: str | None = None
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+    resolved_at: datetime | None = None

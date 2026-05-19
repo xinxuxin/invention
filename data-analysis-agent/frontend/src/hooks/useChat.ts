@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
-import { streamChat } from "../lib/api";
+import { approveConfirmation, rejectConfirmation, streamChat } from "../lib/api";
 import type {
   ChatHistoryMessage,
   ChatStreamEvent,
@@ -35,9 +35,13 @@ export type ChatMessage = {
 export type PendingConfirmation = {
   assistantMessageId: string;
   originalMessage: string;
+  confirmationId?: string | null;
   message: string;
   code?: string | null;
   mutationSummary?: string | null;
+  operationSummary?: string | null;
+  riskLevel?: string | null;
+  affectedDatasetIds?: string[];
 };
 
 type UseChatOptions = {
@@ -157,11 +161,42 @@ export function useChat({
       return;
     }
 
-    void sendMessage(pendingConfirmation.originalMessage, {
-      confirmed: true,
-      reuseAssistantId: pendingConfirmation.assistantMessageId,
-    });
-  }, [pendingConfirmation, sendMessage]);
+    if (!sessionId || !pendingConfirmation.confirmationId) {
+      void sendMessage(pendingConfirmation.originalMessage, {
+        confirmed: true,
+        reuseAssistantId: pendingConfirmation.assistantMessageId,
+      });
+      return;
+    }
+
+    const assistantId = pendingConfirmation.assistantMessageId;
+    setPendingConfirmation(null);
+    setIsStreaming(true);
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === assistantId ? { ...message, status: "streaming" } : message,
+      ),
+    );
+
+    void approveConfirmation(sessionId, pendingConfirmation.confirmationId)
+      .then((response) => {
+        response.events.forEach((event) => {
+          handleStreamEvent({
+            event,
+            assistantId,
+            originalMessage: pendingConfirmation.originalMessage,
+            setMessages,
+            setPendingConfirmation,
+            onStateChanged,
+          });
+        });
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Confirmation failed";
+        addAssistantError(setMessages, assistantId, message);
+      })
+      .finally(() => setIsStreaming(false));
+  }, [onStateChanged, pendingConfirmation, sendMessage, sessionId]);
 
   const cancelPending = useCallback(() => {
     if (!pendingConfirmation) {
@@ -169,19 +204,41 @@ export function useChat({
     }
 
     const assistantId = pendingConfirmation.assistantMessageId;
-    setMessages((current) =>
-      current.map((message) =>
-        message.id === assistantId
-          ? {
-              ...message,
-              status: "done",
-              finalAnswer: "Canceled. I did not run the proposed mutation.",
-            }
-          : message,
-      ),
-    );
     setPendingConfirmation(null);
-  }, [pendingConfirmation]);
+
+    if (!sessionId || !pendingConfirmation.confirmationId) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                status: "done",
+                finalAnswer: "Canceled. I did not run the proposed mutation.",
+              }
+            : message,
+        ),
+      );
+      return;
+    }
+
+    void rejectConfirmation(sessionId, pendingConfirmation.confirmationId)
+      .then((response) => {
+        response.events.forEach((event) => {
+          handleStreamEvent({
+            event,
+            assistantId,
+            originalMessage: pendingConfirmation.originalMessage,
+            setMessages,
+            setPendingConfirmation,
+            onStateChanged,
+          });
+        });
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Cancel failed";
+        addAssistantError(setMessages, assistantId, message);
+      });
+  }, [onStateChanged, pendingConfirmation, sessionId]);
 
   const stop = useCallback(() => {
     controllerRef.current?.abort();
@@ -265,9 +322,13 @@ function handleStreamEvent({
     setPendingConfirmation({
       assistantMessageId: assistantId,
       originalMessage,
+      confirmationId: event.confirmation_id,
       message: event.message,
       code: event.code,
       mutationSummary: event.mutation_summary,
+      operationSummary: event.operation_summary,
+      riskLevel: event.risk_level,
+      affectedDatasetIds: event.affected_dataset_ids,
     });
     setMessages((current) =>
       current.map((message) =>
@@ -329,6 +390,31 @@ function toTraceEvent(event: ChatStreamEvent): ChatTraceEvent {
   }
 
   return { id: crypto.randomUUID(), type: event.type };
+}
+
+function addAssistantError(
+  setMessages: Dispatch<SetStateAction<ChatMessage[]>>,
+  assistantId: string,
+  message: string,
+) {
+  setMessages((current) =>
+    current.map((item) =>
+      item.id === assistantId
+        ? {
+            ...item,
+            status: "error",
+            trace: [
+              ...item.trace,
+              {
+                id: crypto.randomUUID(),
+                type: "error",
+                message,
+              },
+            ],
+          }
+        : item,
+    ),
+  );
 }
 
 function historyForModel(messages: ChatMessage[]): ChatHistoryMessage[] {
