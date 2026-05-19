@@ -248,6 +248,40 @@ def test_pydantic_wrapper_to_dataframe_uses_domain_columns() -> None:
     assert not isinstance(records[0]["owners"], str)
 
 
+def test_to_dataframe_and_objects_to_records_are_full_by_default() -> None:
+    records = [{"country": ["A", "B", "C"][index % 3], "value": index} for index in range(100)]
+
+    frame = to_dataframe(records)
+    limited = to_dataframe(records, limit=20)
+    converted = objects_to_records(records)
+
+    assert len(frame) == 100
+    assert len(limited) == 20
+    assert len(converted) == 100
+    assert frame["country"].value_counts().sum() == 100
+
+
+def test_preview_dataframe_limits_without_changing_full_dataframe(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(
+        db_session,
+        filename="hundred.pkl",
+        value=pd.DataFrame({"country": ["A"] * 100, "value": list(range(100))}),
+    )
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "df = to_dataframe(data)\npreview_df = preview_dataframe(data, limit=20)\nRESULT = {'full_rows': len(df), 'preview_rows': len(preview_df), 'preview': preview(df)}",
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.result_preview["full_rows"] == 100
+    assert result.result_preview["preview_rows"] == 20
+    assert result.result_preview["preview"]["shape"] == [100, 2]
+    assert len(result.result_preview["preview"]["rows"]) == 20
+
+
 def test_execute_python_calls_are_isolated(db_session: Session) -> None:
     session_id, dataset_id = _create_dataset(db_session)
     executor = PythonExecutor(db_session)
@@ -275,6 +309,27 @@ def test_dataset_profiles_namespace_is_available(db_session: Session) -> None:
     assert result.ok is True
     assert result.result_preview["keys"] == ["profile_frame"]
     assert result.result_preview["active_type"] == "DataFrame"
+
+
+def test_artifact_history_namespace_is_available(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session, filename="artifact-frame.pkl")
+    executor = PythonExecutor(db_session)
+    first = executor.execute(
+        session_id,
+        "save_table('Preview', data.head(1))",
+        active_dataset_id=dataset_id,
+    )
+
+    second = executor.execute(
+        session_id,
+        "{'artifact_names': [artifact['name'] for artifact in artifact_history], 'alias_names': [artifact['name'] for artifact in artifacts]}",
+        active_dataset_id=dataset_id,
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert second.result_preview["artifact_names"] == ["Preview"]
+    assert second.result_preview["alias_names"] == ["Preview"]
 
 
 def test_mutating_execution_creates_new_version(db_session: Session) -> None:
@@ -686,6 +741,28 @@ def test_save_chart_accepts_single_spec_argument(db_session: Session) -> None:
     assert artifact.chart_spec is not None
     assert artifact.chart_spec["data"][0] == {"year": 2020, "count": 2}
     assert payload["chart_spec"]["x"] == "year"
+
+
+def test_save_chart_accepts_keyword_data_merge(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "rows = [{'country': 'A', 'count': 3}]",
+                "save_chart(name='Country chart', chart_spec={'title': 'Country chart', 'chart_type': 'bar', 'x': 'country', 'y': 'count'}, data=rows)",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    artifact = next(item for item in result.artifacts if item.kind == "chart")
+
+    assert result.ok is True
+    assert artifact.chart_spec is not None
+    assert artifact.chart_spec["data"] == [{"country": "A", "count": 3}]
 
 
 def test_invalid_chart_artifact_returns_traceback(db_session: Session) -> None:

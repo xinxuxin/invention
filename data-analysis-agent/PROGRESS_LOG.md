@@ -232,3 +232,19 @@
 - Verified frontend build passes: `npm run build`.
 - Attempted frontend lint: `npm run lint` still fails because no ESLint configuration file exists in the frontend project.
 - Verified fake SoftBank quick eval passes with the updated inspect/table/schema/chart/export/ambiguous-delete/history/confirmation rubric.
+- Started follow-up SoftBank chat regression pass using `data-analysis-chat-2026-05-19T04-20-30-920Z.md` as the failure source.
+- Fixed full-data runtime conversion semantics so `to_dataframe(data)` and `objects_to_records(data)` process the full active dataset by default, while explicit limits and preview helpers are the only row-limited paths.
+- Added preview/artifact metadata for `source_row_count`, `analyzed_row_count`, `preview_row_count`, and `is_sampled` so verifier/eval can catch sample-only analysis.
+- Hardened response formatting for serialized Python type objects and structured inspection previews so final answers say `list` and representative fields instead of dumping raw `attrs`/type dictionaries.
+- Strengthened deterministic verifier checks for wrapper leakage, sample-only top-k/count analysis, invalid chart specs, mutation intent without confirmation/state change, undefined `artifacts`, and schema answers that only inspect wrapper fields.
+- Added controller-level delete shortcuts for explicit `delete last N entries` and `delete empty title`, including full-dataset scans, row-count metadata, human-readable confirmation payloads, and rollback-safe mutation code after approval.
+- Injected lightweight runtime metadata variables (`artifact_history`, `mutation_history`, `branch_history`, `current_branch`, `current_version`, and `artifacts` alias) to prevent undefined artifact/history lookups.
+- Improved fake demo-agent behavior so inspection returns representative fields, top-country/table/chart operations use full converted data, and top-5 CSV export does not try to export the entire raw SoftBank object list.
+- Reworked chart rendering to avoid blank Recharts output by measuring the artifact card container and passing explicit numeric chart width/height instead of relying only on `ResponsiveContainer`.
+- Expanded `evaluate_agent_demo.py` and the SoftBank eval YAML with formatter, schema-quality, full-data top-country/year, chart-contract, delete-confirmation, and empty-title full-scan checks.
+- Browser-smoke-tested chart rendering in the local app; the inline chart now renders an SVG with visible marks instead of an empty container.
+- Verified backend lint passes: `ruff check .`.
+- Verified backend tests pass: `112 passed`.
+- Verified frontend build passes: `npm run build`.
+- Attempted frontend lint: `npm run lint` still fails because the frontend project has no ESLint configuration file.
+- Verified fake SoftBank quick eval passes: `python backend/scripts/evaluate_agent_demo.py --quick --dataset /Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl --base-url http://127.0.0.1:8001`.

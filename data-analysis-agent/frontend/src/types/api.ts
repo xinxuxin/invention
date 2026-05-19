@@ -174,6 +174,9 @@ export type ChatStreamEvent =
       title?: string | null;
       dataset_name?: string | null;
       expected_effect?: string | null;
+      affected_count?: number | null;
+      current_row_count?: number | null;
+      new_row_count?: number | null;
       state_impact?: string | null;
       reversible?: boolean | null;
       rollback_note?: string | null;

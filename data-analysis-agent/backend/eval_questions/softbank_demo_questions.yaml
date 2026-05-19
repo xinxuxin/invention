@@ -7,6 +7,9 @@ questions:
       - state_changed_false
       - no_raw_dict_preview
       - no_public_verifier_exception
+      - no_raw_type_attrs
+      - mentions_24410
+      - mentions_representative_fields
   - id: tabular_preview
     prompt: "Convert this dataset into a tabular preview if possible. Show the inferred columns and the first 5 rows."
     expects:
@@ -17,12 +20,28 @@ questions:
     prompt: "Summarize the schema of this patent metadata dataset. Which fields are scalar fields, which are dates, and which are list-like fields?"
     expects:
       - schema_terms
+      - schema_domain_fields
+      - no_pydantic_in_answer
       - no_step_budget
   - id: top_countries
     prompt: "Show the top countries by number of patent records. Return both a table and a short explanation."
     expects:
       - table_artifact
+      - table_row_count_at_least_3
+      - table_counts_full_24410
+      - not_cn19_ca1_only
       - state_changed_false
+  - id: filings_by_year_full_data
+    prompt: "What is the filing date range of this portfolio? Also summarize the number of filings by year in a table."
+    expects:
+      - table_artifact
+      - filing_years_full_data
+      - state_changed_false
+  - id: chart_render_contract
+    prompt: "Create a bar chart showing the number of patent records by country."
+    expects:
+      - chart_artifact
+      - chart_data_valid
   - id: filings_chart
     prompt: "Create a line chart or bar chart showing filings by year based on filing_date."
     expects:
@@ -45,6 +64,17 @@ questions:
       - history_answer
       - no_name_error
       - state_changed_false
+  - id: delete_last_500
+    prompt: "delete last 500 entries"
+    expects:
+      - confirmation_required
+      - delete_last_500_confirmation
+      - state_not_changed_before_approval
+  - id: delete_empty_title
+    prompt: "delete empty title"
+    expects:
+      - full_scan_delete_empty_title
+      - state_not_changed_or_confirmation
   - id: confirmation_summary
     prompt: "Create a cleaned working dataset that removes records with missing titles. This should mutate the current dataset."
     expects:

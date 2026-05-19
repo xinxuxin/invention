@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 import time
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from openai import OpenAI
@@ -17,7 +19,7 @@ from app.agent.verifier import ResultVerifier, merge_verification_results, verif
 from app.agent.llm_verifier import LLMVerifier
 from app.core.config import get_settings
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
-from app.runtime.python_executor import ExecutionResult, PythonExecutor
+from app.runtime.python_executor import ExecutionResult, PythonExecutor, to_dataframe
 from app.services.versioning import (
     active_branch,
     apply_version_to_dataset,
@@ -26,6 +28,7 @@ from app.services.versioning import (
     latest_versions_for_branch,
     sync_branch_pointer,
 )
+from app.storage.files import load_pickle
 
 MAX_AGENT_STEPS = get_settings().agent_max_steps
 MAX_EXECUTION_ATTEMPTS = get_settings().agent_max_retries
@@ -131,6 +134,7 @@ class FakeAgentModelClient:
         del instructions, tools
         last_item = input_items[-1] if input_items else {}
         if last_item.get("type") == "function_call_output":
+            prompt = _latest_user_request(input_items).lower()
             output = parse_tool_arguments(str(last_item.get("output", "{}")))
             verifier = output.get("verifier") if isinstance(output.get("verifier"), dict) else {}
             retry_instruction = str(verifier.get("retry_instruction") or "")
@@ -154,7 +158,7 @@ class FakeAgentModelClient:
                 return _fake_tool_response(
                     "execute_python",
                     {
-                        "code": "df = to_dataframe(data, limit=500)\nsave_csv('Verified export', df.head(50))\npreview({'rows': min(len(df), 50), 'columns': list(df.columns)})",
+                        "code": _fake_export_code(prompt, name="Verified export"),
                         "mutates_state": False,
                     },
                 )
@@ -220,7 +224,7 @@ class FakeAgentModelClient:
             return _fake_tool_response(
                 "execute_python",
                 {
-                    "code": _fake_chart_code(),
+                    "code": _fake_chart_code(prompt),
                     "mutates_state": False,
                 },
             )
@@ -238,7 +242,7 @@ class FakeAgentModelClient:
             return _fake_tool_response(
                 "execute_python",
                 {
-                    "code": "df = to_dataframe(data, limit=500)\nsave_csv('Fake agent export', df.head(50))\npreview({'rows': min(len(df), 50), 'columns': list(df.columns)})",
+                    "code": _fake_export_code(prompt),
                     "mutates_state": False,
                 },
             )
@@ -291,7 +295,9 @@ class FakeAgentModelClient:
             {
                 "code": "\n".join(
                     [
-                        "summary = {'type': type(data).__name__, 'shape': getattr(data, 'shape', None), 'length': len(data) if hasattr(data, '__len__') else None}",
+                        "df = to_dataframe(data, limit=None)",
+                        "fields = [str(column) for column in list(df.columns)[:20]]",
+                        "summary = {'object_type': type(data).__name__, 'shape': getattr(data, 'shape', None), 'length': len(data) if hasattr(data, '__len__') else None, 'representative_fields': fields, 'sample_records': df.head(3).to_dict('records'), 'source_row_count': len(df), 'analyzed_row_count': len(df)}",
                         "print(summary)",
                         "preview(summary)",
                     ]
@@ -343,6 +349,13 @@ class CodingAgent:
             yield {"type": "trace", "message": "Inspecting the active dataset structure..."}
         else:
             yield {"type": "trace", "message": "No datasets are uploaded yet; preparing a direct response..."}
+
+        delete_events = self._delete_mutation_shortcut(session_id, request)
+        if delete_events is not None:
+            for event in delete_events:
+                yield event
+            yield {"type": "message_done"}
+            return
 
         clarification = _clarification_for_ambiguous_destructive_request(request.message)
         if clarification:
@@ -831,7 +844,10 @@ class CodingAgent:
             "operation_summary": summary,
             "dataset_name": dataset_name,
             "risk_level": confirmation.risk_level,
-            "expected_effect": _expected_effect(summary, dataset_name),
+            "expected_effect": _expected_effect(summary, dataset_name, confirmation.tool_arguments),
+            "affected_count": confirmation.tool_arguments.get("affected_count"),
+            "current_row_count": confirmation.tool_arguments.get("current_row_count"),
+            "new_row_count": confirmation.tool_arguments.get("new_row_count"),
             "state_impact": "This will create a new version on the current branch.",
             "reversible": True,
             "rollback_note": "You can rollback to the previous version from mutation history.",
@@ -848,6 +864,199 @@ class CodingAgent:
         if dataset is None:
             return "Current dataset"
         return dataset.dataset_key or dataset.original_filename
+
+    def _delete_mutation_shortcut(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+    ) -> list[dict[str, Any]] | None:
+        lowered = request.message.lower().strip()
+        last_match = re.search(r"\b(?:delete|remove|drop)\s+last\s+(\d+)\s+(?:entries|rows|records)\b", lowered)
+        if last_match:
+            return self._confirm_delete_last_n(session_id, request, int(last_match.group(1)))
+
+        if (
+            any(term in lowered for term in ("delete", "remove", "drop"))
+            and any(term in lowered for term in ("empty title", "blank title", "null title"))
+        ):
+            return self._confirm_delete_empty_title(session_id, request)
+
+        return None
+
+    def _confirm_delete_last_n(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+        count: int,
+    ) -> list[dict[str, Any]]:
+        dataset = self._active_dataset_for_request(session_id, request.active_dataset_id)
+        if dataset is None:
+            return [{"type": "error", "message": "No active dataset is available for deletion."}]
+        value = load_pickle(Path(dataset.current_snapshot_path))
+        current_count = len(value) if hasattr(value, "__len__") else len(to_dataframe(value, limit=None))
+        delete_count = min(count, current_count)
+        new_count = max(0, current_count - delete_count)
+        code = "\n".join(
+            [
+                f"delete_count = {delete_count}",
+                "current_count = len(data) if hasattr(data, '__len__') else len(to_dataframe(data, limit=None))",
+                "if delete_count <= 0:",
+                "    RESULT = {'full_scan': True, 'deleted_count': 0, 'current_row_count': current_count, 'new_row_count': current_count}",
+                "elif isinstance(data, pd.DataFrame):",
+                "    data = data.iloc[:-delete_count].copy()",
+                "elif isinstance(data, list):",
+                "    data = data[:-delete_count]",
+                "elif isinstance(data, tuple):",
+                "    data = list(data[:-delete_count])",
+                "else:",
+                "    frame = to_dataframe(data, limit=None)",
+                "    data = frame.iloc[:-delete_count].copy()",
+                "RESULT = {'full_scan': True, 'deleted_count': delete_count, 'current_row_count': current_count, 'new_row_count': len(data)}",
+            ]
+        )
+        confirmation = self._direct_confirmation(
+            session_id=session_id,
+            request=request,
+            dataset=dataset,
+            code=code,
+            operation_summary=f"Delete the last {delete_count:,} records from the current working dataset",
+            risk_level="high",
+            metadata={
+                "current_row_count": current_count,
+                "new_row_count": new_count,
+                "affected_count": delete_count,
+            },
+        )
+        return [
+            {"type": "trace", "message": "Confirmation required before deleting records."},
+            self._confirmation_event(
+                confirmation,
+                message="Deleting records changes the active dataset state. Please confirm before I apply it.",
+            ),
+        ]
+
+    def _confirm_delete_empty_title(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+    ) -> list[dict[str, Any]]:
+        dataset = self._active_dataset_for_request(session_id, request.active_dataset_id)
+        if dataset is None:
+            return [{"type": "error", "message": "No active dataset is available for deletion."}]
+        value = load_pickle(Path(dataset.current_snapshot_path))
+        frame = to_dataframe(value, limit=None)
+        current_count = int(len(frame))
+        if "title" not in frame.columns:
+            return [
+                {"type": "trace", "message": "Scanned the full dataset for a title field..."},
+                {
+                    "type": "final_answer",
+                    "answer": "I scanned the full dataset and could not find a `title` field to evaluate.\n\n**State changed:** No",
+                    "state_changed": False,
+                },
+            ]
+        title_values = frame["title"]
+        empty_mask = title_values.isna() | title_values.astype(str).str.strip().eq("")
+        affected_count = int(empty_mask.sum())
+        if affected_count == 0:
+            return [
+                {"type": "trace", "message": "Scanned the full dataset for empty titles..."},
+                {
+                    "type": "final_answer",
+                    "answer": (
+                        f"I scanned all {current_count:,} records and found **0** records with missing, "
+                        "null, or blank `title` values.\n\n**State changed:** No"
+                    ),
+                    "state_changed": False,
+                },
+            ]
+
+        new_count = current_count - affected_count
+        code = "\n".join(
+            [
+                "def _empty_title(record):",
+                "    value = record.get('title')",
+                "    return value is None or (isinstance(value, str) and value.strip() == '')",
+                "if isinstance(data, pd.DataFrame):",
+                "    frame = data.copy()",
+                "    title_values = frame['title'] if 'title' in frame.columns else pd.Series([], dtype=object)",
+                "    keep_mask = ~(title_values.isna() | title_values.astype(str).str.strip().eq(''))",
+                "    current_count = len(frame)",
+                "    affected_count = current_count - int(keep_mask.sum())",
+                "    data = frame.loc[keep_mask].copy()",
+                "else:",
+                "    records = objects_to_records(data, limit=None)",
+                "    keep_mask = [not _empty_title(record) for record in records]",
+                "    current_count = len(records)",
+                "    affected_count = current_count - sum(keep_mask)",
+                "    if isinstance(data, list):",
+                "        data = [item for item, keep in zip(data, keep_mask) if keep]",
+                "    elif isinstance(data, tuple):",
+                "        data = [item for item, keep in zip(data, keep_mask) if keep]",
+                "    else:",
+                "        frame = to_dataframe(data, limit=None)",
+                "        data = frame.loc[keep_mask].copy()",
+                "RESULT = {'full_scan': True, 'affected_count': affected_count, 'current_row_count': current_count, 'new_row_count': len(data)}",
+            ]
+        )
+        confirmation = self._direct_confirmation(
+            session_id=session_id,
+            request=request,
+            dataset=dataset,
+            code=code,
+            operation_summary="Remove records where `title` is missing, null, or blank",
+            risk_level="medium",
+            metadata={
+                "current_row_count": current_count,
+                "new_row_count": new_count,
+                "affected_count": affected_count,
+            },
+        )
+        return [
+            {"type": "trace", "message": "Scanned the full dataset and found records that match the delete rule."},
+            self._confirmation_event(
+                confirmation,
+                message="Deleting records with empty titles changes the active dataset state. Please confirm before I apply it.",
+            ),
+        ]
+
+    def _active_dataset_for_request(self, session_id: str, active_dataset_id: str | None) -> Dataset | None:
+        session = self.db.get(AnalysisSession, session_id)
+        resolved_id = active_dataset_id or (session.active_dataset_id if session else None)
+        if resolved_id:
+            dataset = self.db.get(Dataset, resolved_id)
+            if dataset is not None and dataset.session_id == session_id:
+                return dataset
+        return self.db.exec(select(Dataset).where(Dataset.session_id == session_id)).first()
+
+    def _direct_confirmation(
+        self,
+        *,
+        session_id: str,
+        request: ChatStreamRequest,
+        dataset: Dataset,
+        code: str,
+        operation_summary: str,
+        risk_level: str,
+        metadata: dict[str, Any],
+    ) -> PendingConfirmation:
+        confirmation = PendingConfirmation(
+            session_id=session_id,
+            proposed_code=code,
+            operation_summary=operation_summary,
+            affected_dataset_ids=[dataset.id],
+            risk_level=risk_level,
+            active_dataset_id=dataset.id,
+            branch_name=request.branch_name,
+            tool_arguments={"mutates_state": True, "mutation_summary": operation_summary, **metadata},
+            model_input_items=[],
+            tool_call_id=None,
+            original_message=request.message,
+        )
+        self.db.add(confirmation)
+        self.db.commit()
+        self.db.refresh(confirmation)
+        return confirmation
 
     def _affected_dataset_ids(
         self,
@@ -1339,11 +1548,21 @@ def _clean_branch_name(value: str) -> str:
     return cleaned[:80] or f"branch-{new_id()[:6]}"
 
 
-def _expected_effect(summary: str, dataset_name: str) -> str:
+def _expected_effect(summary: str, dataset_name: str, metadata: Mapping[str, Any] | None = None) -> str:
     cleaned = summary.rstrip(".")
+    metadata = metadata or {}
+    current_count = metadata.get("current_row_count")
+    new_count = metadata.get("new_row_count")
+    affected_count = metadata.get("affected_count")
+    if isinstance(current_count, int) and isinstance(new_count, int):
+        count_text = f" Row count will change from {current_count:,} to {new_count:,}."
+        if isinstance(affected_count, int):
+            count_text += f" Affected records: {affected_count:,}."
+    else:
+        count_text = ""
     if cleaned:
-        return f"{cleaned}. The working state for `{dataset_name}` will be updated if you approve."
-    return f"The working state for `{dataset_name}` will be updated if you approve."
+        return f"{cleaned}. The working state for `{dataset_name}` will be updated if you approve.{count_text}"
+    return f"The working state for `{dataset_name}` will be updated if you approve.{count_text}"
 
 
 def _branch_exists(session_id: str, name: str, db: Session) -> bool:
@@ -1524,25 +1743,45 @@ def _latest_user_request(input_items: list[dict[str, Any]]) -> str:
     return request.split("Respond by using", maxsplit=1)[0].strip()
 
 
-def _fake_chart_code() -> str:
+def _fake_chart_code(prompt: str = "") -> str:
+    request_text = json.dumps(prompt)
     return "\n".join(
         [
-            "if isinstance(data, pd.DataFrame) and len(data) > 0:",
-            "    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()",
-            "    label_cols = [col for col in data.columns if col not in numeric_cols]",
-            "    y = numeric_cols[0] if numeric_cols else data.columns[0]",
-            "    x = label_cols[0] if label_cols else data.columns[0]",
-            "    if x != y and numeric_cols:",
-            "        rows = data.groupby(x, dropna=False, as_index=False)[y].sum().head(10).to_dict('records')",
-            "    else:",
-            "        rows = data.head(10).reset_index().rename(columns={'index': 'row'}).to_dict('records')",
-            "        x = 'row'",
-            "    save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': x, 'y': y, 'description': 'Deterministic test chart'})",
-            "    preview(rows)",
-            "else:",
+            f"request_text = {request_text}",
+            "df = to_dataframe(data, limit=None)",
+            "if len(df) == 0:",
             "    rows = [{'name': key, 'size': len(value) if hasattr(value, '__len__') else 1} for key, value in datasets.items()]",
-            "    save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': 'name', 'y': 'size', 'description': 'Dataset sizes'})",
-            "    preview(rows)",
+            "    x, y, title = 'name', 'size', 'Dataset sizes'",
+            "elif 'filing_date' in df.columns and ('year' in request_text or 'filing' in request_text):",
+            "    dates = pd.to_datetime(df['filing_date'], errors='coerce')",
+            "    grouped = dates.dropna().dt.year.value_counts().sort_index().reset_index()",
+            "    grouped.columns = ['filing_year', 'record_count']",
+            "    rows = grouped.to_dict('records')",
+            "    x, y, title = 'filing_year', 'record_count', 'Filings by year'",
+            "elif 'country' in df.columns:",
+            "    grouped = df['country'].astype(str).value_counts().head(15).reset_index()",
+            "    grouped.columns = ['country', 'record_count']",
+            "    rows = grouped.to_dict('records')",
+            "    x, y, title = 'country', 'record_count', 'Patent records by country'",
+            "else:",
+            "    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()",
+            "    label_cols = [col for col in df.columns if col not in numeric_cols]",
+            "    y = numeric_cols[0] if numeric_cols else 'record_count'",
+            "    x = label_cols[0] if label_cols else 'row'",
+            "    if numeric_cols and label_cols:",
+            "        rows = df.groupby(x, dropna=False, as_index=False)[y].sum().head(10).to_dict('records')",
+            "    else:",
+            "        rows = df.head(10).reset_index().rename(columns={'index': 'row'}).to_dict('records')",
+            "        if 'record_count' not in rows[0]:",
+            "            rows = [{'row': row.get('row', index), 'record_count': 1} for index, row in enumerate(rows)]",
+            "        x, y = 'row', 'record_count'",
+            "    title = 'Dataset chart'",
+            "if not rows:",
+            "    rows = [{'name': key, 'size': len(value) if hasattr(value, '__len__') else 1} for key, value in datasets.items()]",
+            "    x, y, title = 'name', 'size', 'Dataset sizes'",
+            "save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': x, 'y': y, 'description': title + ' generated from the full active dataset'})",
+            "save_table('Chart source data', rows, description='Underlying data for the chart')",
+            "preview({'rows': rows[:20], 'source_row_count': len(df), 'analyzed_row_count': len(df)})",
         ]
     )
 
@@ -1550,12 +1789,14 @@ def _fake_chart_code() -> str:
 def _fake_table_code() -> str:
     return "\n".join(
         [
-            "df = to_dataframe(data, limit=500)",
+            "df = to_dataframe(data, limit=None)",
             "if 'country' in df.columns:",
             "    rows = df['country'].astype(str).value_counts().head(10).reset_index()",
             "    rows.columns = ['country', 'record_count']",
+            "    rows.attrs['source_row_count'] = len(df)",
+            "    rows.attrs['analyzed_row_count'] = len(df)",
             "    save_table('Top countries', rows, description='Records by country')",
-            "    preview({'columns': list(rows.columns), 'rows': rows.to_dict('records')})",
+            "    preview({'columns': list(rows.columns), 'rows': rows.to_dict('records'), 'source_row_count': len(df), 'analyzed_row_count': len(df)})",
             "else:",
             "    preview_df = df.head(5)",
             "    save_table('Tabular preview', preview_df, description='First rows converted with generic helpers')",
@@ -1564,10 +1805,32 @@ def _fake_table_code() -> str:
     )
 
 
+def _fake_export_code(prompt: str = "", *, name: str = "Fake agent export") -> str:
+    request_text = json.dumps(prompt)
+    artifact_name = json.dumps(name)
+    return "\n".join(
+        [
+            f"request_text = {request_text}",
+            f"artifact_name = {artifact_name}",
+            "df = to_dataframe(data, limit=None)",
+            "if 'top' in request_text and 'country' in df.columns:",
+            "    export_df = df['country'].astype(str).value_counts().head(5).reset_index()",
+            "    export_df.columns = ['country', 'record_count']",
+            "    export_df.attrs['source_row_count'] = len(df)",
+            "    export_df.attrs['analyzed_row_count'] = len(df)",
+            "    save_csv('Top 5 countries', export_df)",
+            "    preview({'rows': export_df.to_dict('records'), 'source_row_count': len(df), 'analyzed_row_count': len(df)})",
+            "else:",
+            "    save_csv(artifact_name, df)",
+            "    preview({'rows': len(df), 'columns': list(df.columns), 'source_row_count': len(df), 'analyzed_row_count': len(df)})",
+        ]
+    )
+
+
 def _fake_schema_code() -> str:
     return "\n".join(
         [
-            "df = to_dataframe(data, limit=100)",
+            "df = to_dataframe(data, limit=None)",
             "records = df.head(20).to_dict('records')",
             "schema = {'scalar_fields': [], 'date_fields': [], 'list_like_fields': []}",
             "for column in df.columns:",

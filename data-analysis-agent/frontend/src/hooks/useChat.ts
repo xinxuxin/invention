@@ -48,6 +48,9 @@ export type PendingConfirmation = {
   title?: string | null;
   datasetName?: string | null;
   expectedEffect?: string | null;
+  affectedCount?: number | null;
+  currentRowCount?: number | null;
+  newRowCount?: number | null;
   stateImpact?: string | null;
   reversible?: boolean | null;
   rollbackNote?: string | null;
@@ -346,6 +349,9 @@ function handleStreamEvent({
       title: event.title,
       datasetName: event.dataset_name,
       expectedEffect: event.expected_effect,
+      affectedCount: event.affected_count,
+      currentRowCount: event.current_row_count,
+      newRowCount: event.new_row_count,
       stateImpact: event.state_impact,
       reversible: event.reversible,
       rollbackNote: event.rollback_note,

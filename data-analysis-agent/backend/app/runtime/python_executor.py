@@ -23,7 +23,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.models.entities import AnalysisSession, Branch, Dataset, VersionNode, new_id, utc_now
+from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode, new_id, utc_now
 from app.schemas.artifact import ChartArtifactSpec
 from app.services.artifacts import persist_artifact
 from app.services.introspection import introspect_object
@@ -126,7 +126,8 @@ class PythonExecutor:
         loaded = self._load_session_datasets(session_id, branch)
         active = self._resolve_active_dataset(loaded, active_dataset_id or analysis_session.active_dataset_id)
 
-        child_payload = self._run_in_child(code, loaded, active, return_state=mutates_state)
+        runtime_metadata = self._runtime_metadata(session_id, branch, loaded, active)
+        child_payload = self._run_in_child(code, loaded, active, runtime_metadata, return_state=mutates_state)
         if child_payload.get("timed_out"):
             return ExecutionResult(
                 ok=False,
@@ -240,6 +241,7 @@ class PythonExecutor:
         code: str,
         loaded: list[LoadedDataset],
         active: LoadedDataset | None,
+        runtime_metadata: dict[str, Any],
         return_state: bool,
     ) -> dict[str, Any]:
         context = _mp_context()
@@ -257,6 +259,7 @@ class PythonExecutor:
                 datasets,
                 dataset_profiles,
                 active_dataset_profile,
+                runtime_metadata,
                 active_key,
                 self.max_stdout_length,
                 self.max_preview_length,
@@ -283,6 +286,73 @@ class PythonExecutor:
             }
 
         return cloudpickle.loads(payload_bytes)
+
+    def _runtime_metadata(
+        self,
+        session_id: str,
+        branch: Branch,
+        loaded: list[LoadedDataset],
+        active: LoadedDataset | None,
+    ) -> dict[str, Any]:
+        dataset_ids = [dataset.row.id for dataset in loaded]
+        versions = (
+            list(
+                self.db.exec(
+                    select(VersionNode)
+                    .where(VersionNode.dataset_id.in_(dataset_ids))
+                    .order_by(VersionNode.created_at)
+                ).all()
+            )
+            if dataset_ids
+            else []
+        )
+        branches = list(self.db.exec(select(Branch).where(Branch.session_id == session_id)).all())
+        artifacts = list(
+            self.db.exec(select(Artifact).where(Artifact.session_id == session_id).order_by(Artifact.created_at)).all()
+        )
+        current = self.db.get(VersionNode, active.row.current_version_id) if active and active.row.current_version_id else None
+        return _json_safe(
+            {
+                "artifact_history": [
+                    {
+                        "id": artifact.id,
+                        "name": artifact.name,
+                        "kind": artifact.kind,
+                        "metadata": artifact.artifact_metadata,
+                        "created_at": artifact.created_at.isoformat(),
+                    }
+                    for artifact in artifacts[-50:]
+                ],
+                "mutation_history": [
+                    {
+                        "version_id": version.id,
+                        "dataset_id": version.dataset_id,
+                        "branch_id": version.branch_id,
+                        "summary": version.mutation_summary or version.label,
+                        "created_at": version.created_at.isoformat(),
+                        "row_count": _profile_row_count(version.profile),
+                    }
+                    for version in versions[-50:]
+                ],
+                "branch_history": [
+                    {
+                        "id": item.id,
+                        "name": item.name,
+                        "current_version_id": item.current_version_id,
+                        "root_version_id": item.root_version_id,
+                        "created_at": item.created_at.isoformat(),
+                    }
+                    for item in branches
+                ],
+                "current_branch": {
+                    "id": branch.id,
+                    "name": branch.name,
+                    "current_version_id": branch.current_version_id,
+                    "root_version_id": branch.root_version_id,
+                },
+                "current_version": _version_metadata(current),
+            }
+        )
 
     def _persist_mutations(
         self,
@@ -403,6 +473,7 @@ def _child_execute(
     datasets: dict[str, Any],
     dataset_profiles: dict[str, Any],
     active_dataset_profile: dict[str, Any] | None,
+    runtime_metadata: dict[str, Any],
     active_key: str | None,
     max_stdout_length: int,
     max_preview_length: int,
@@ -427,6 +498,13 @@ def _child_execute(
         "datasets": datasets,
         "dataset_profiles": dataset_profiles,
         "active_dataset_profile": active_dataset_profile,
+        "artifact_history": runtime_metadata.get("artifact_history", []),
+        "artifacts": runtime_metadata.get("artifact_history", []),
+        "current_message_artifacts": artifacts,
+        "mutation_history": runtime_metadata.get("mutation_history", []),
+        "branch_history": runtime_metadata.get("branch_history", []),
+        "current_branch": runtime_metadata.get("current_branch"),
+        "current_version": runtime_metadata.get("current_version"),
         "data": data,
         "pd": pd,
         "np": np,
@@ -441,6 +519,7 @@ def _child_execute(
         "object_to_record": object_to_record,
         "objects_to_records": objects_to_records,
         "to_dataframe": to_dataframe,
+        "preview_dataframe": preview_dataframe,
     }
 
     _block_network()
@@ -507,7 +586,13 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
         artifacts.append(_table_artifact_payload(name, dataframe_or_records, description=description))
         return {"kind": "table", "name": name}
 
-    def save_chart(*args: Any, description: str | None = None) -> dict[str, str]:
+    def save_chart(*args: Any, description: str | None = None, **kwargs: Any) -> dict[str, str]:
+        kw_name = kwargs.pop("name", None)
+        kw_spec = kwargs.pop("chart_spec", None)
+        kw_data = kwargs.pop("data", None)
+        if kwargs:
+            raise TypeError(f"save_chart got unsupported keyword argument(s): {', '.join(sorted(kwargs))}")
+
         if len(args) == 1:
             chart_spec = args[0]
             if not isinstance(chart_spec, Mapping):
@@ -518,8 +603,18 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
             chart_spec = args[1]
             if len(args) >= 3 and description is None:
                 description = str(args[2]) if args[2] is not None else None
+        elif kw_spec is not None:
+            chart_spec = kw_spec
+            name = str(kw_name or (chart_spec.get("title") if isinstance(chart_spec, Mapping) else None) or "Chart")
         else:
             raise TypeError("save_chart requires chart_spec or name and chart_spec")
+
+        if kw_name is not None:
+            name = str(kw_name)
+        if kw_data is not None:
+            if not isinstance(chart_spec, Mapping):
+                raise TypeError("save_chart data= requires chart_spec to be a mapping")
+            chart_spec = {**dict(chart_spec), "data": kw_data}
 
         safe_spec = _validated_chart_spec(name, chart_spec, description=description)
         artifacts.append(
@@ -680,7 +775,7 @@ def objects_to_records(items: Any, limit: int | None = None) -> list[dict[str, A
 
 
 def _objects_to_records(items: Any, limit: int | None = None, *, iso_dates: bool) -> list[dict[str, Any]]:
-    max_items = MAX_PREVIEW_ROWS if limit is None else max(0, limit)
+    max_items = None if limit is None else max(0, limit)
     if isinstance(items, Mapping) or isinstance(items, (str, bytes, bytearray)):
         return [_record_safe(_domain_record(safe_attrs(items)), iso_dates=iso_dates)]
 
@@ -691,7 +786,7 @@ def _objects_to_records(items: Any, limit: int | None = None, *, iso_dates: bool
 
     records: list[dict[str, Any]] = []
     for index, item in enumerate(iterator):
-        if index >= max_items:
+        if max_items is not None and index >= max_items:
             break
         records.append(_record_safe(_domain_record(safe_attrs(item)), iso_dates=iso_dates))
     return records
@@ -699,10 +794,11 @@ def _objects_to_records(items: Any, limit: int | None = None, *, iso_dates: bool
 
 def to_dataframe(obj: Any, limit: int | None = None) -> pd.DataFrame:
     if isinstance(obj, pd.DataFrame):
-        return obj
+        return obj.head(limit) if limit is not None else obj
 
     if isinstance(obj, pd.Series):
-        return obj.to_frame()
+        series = obj.head(limit) if limit is not None else obj
+        return series.to_frame()
 
     if isinstance(obj, np.ndarray):
         array = obj[:limit] if limit is not None and obj.ndim > 0 else obj
@@ -721,6 +817,10 @@ def to_dataframe(obj: Any, limit: int | None = None) -> pd.DataFrame:
         return pd.DataFrame(_objects_to_records(obj, limit=limit, iso_dates=False))
     except Exception:
         return pd.DataFrame([{"repr": _safe_repr(obj)}])
+
+
+def preview_dataframe(obj: Any, limit: int = MAX_PREVIEW_ROWS) -> pd.DataFrame:
+    return to_dataframe(obj, limit=limit)
 
 
 def _pydantic_dump(obj: Any) -> dict[str, Any] | None:
@@ -805,14 +905,17 @@ def _table_artifact_payload(
         "kind": "table",
         "name": name,
         "content": document,
-        "metadata": {
-            "type": "table",
-            "title": document["title"],
-            "description": document.get("description"),
-            "columns": document["columns"],
-            "row_count": document["row_count"],
-            "preview_row_count": document["preview_row_count"],
-            "stored_row_count": document["stored_row_count"],
+            "metadata": {
+                "type": "table",
+                "title": document["title"],
+                "description": document.get("description"),
+                "columns": document["columns"],
+                "row_count": document["row_count"],
+                "source_row_count": document["source_row_count"],
+                "analyzed_row_count": document["analyzed_row_count"],
+                "preview_row_count": document["preview_row_count"],
+                "is_sampled": document["is_sampled"],
+                "stored_row_count": document["stored_row_count"],
             "stored_column_count": document["stored_column_count"],
             "csv_download_available": True,
         },
@@ -828,6 +931,9 @@ def _table_document(
     columns_override: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     frame = _frame_for_table(data)
+    source_row_count = _source_row_count(data)
+    analyzed_row_count = _dataframe_attr_int(frame, "analyzed_row_count") or source_row_count or int(len(frame))
+    source_row_count = _dataframe_attr_int(frame, "source_row_count") or source_row_count or analyzed_row_count
     frame = frame.copy()
     frame.columns = _unique_column_names(frame.columns)
 
@@ -854,7 +960,10 @@ def _table_document(
         "rows": rows,
         "preview_rows": preview_rows,
         "row_count": int(row_count),
+        "source_row_count": int(source_row_count),
+        "analyzed_row_count": int(analyzed_row_count),
         "preview_row_count": len(preview_rows),
+        "is_sampled": bool(analyzed_row_count < source_row_count),
         "stored_row_count": len(rows),
         "stored_column_count": len(columns),
         "truncated": bool(row_count > len(rows) or len(frame.columns) > len(columns)),
@@ -868,8 +977,28 @@ def _frame_for_table(value: Any) -> pd.DataFrame:
         name = value.name if value.name is not None else "value"
         return value.to_frame(name=str(name))
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return pd.DataFrame(_objects_to_records(value, limit=MAX_TABLE_STORED_ROWS, iso_dates=False))
+        return pd.DataFrame(_objects_to_records(value, limit=None, iso_dates=False))
     return to_dataframe(value)
+
+
+def _source_row_count(value: Any) -> int | None:
+    if isinstance(value, pd.DataFrame):
+        return int(len(value))
+    if isinstance(value, pd.Series):
+        return int(len(value))
+    if isinstance(value, np.ndarray) and value.ndim > 0:
+        return int(value.shape[0])
+    try:
+        return int(len(value))  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+def _dataframe_attr_int(frame: pd.DataFrame, key: str) -> int | None:
+    value = frame.attrs.get(key)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    return None
 
 
 def _unique_column_names(columns: Sequence[Any]) -> list[str]:
@@ -1253,6 +1382,9 @@ def _json_safe(
     if value is None or isinstance(value, (str, int, bool)):
         return _truncate_preview_string(value, max_string_length) if isinstance(value, str) else value
 
+    if isinstance(value, type):
+        return _type_name(value)
+
     if depth >= max_depth:
         return _safe_repr(value, max_string_length)
 
@@ -1279,6 +1411,8 @@ def _json_safe(
             "type": "dataframe",
             "shape": [int(value.shape[0]), int(value.shape[1])],
             "columns": [str(column) for column in value.columns.tolist()],
+            "source_row_count": int(value.attrs.get("source_row_count") or len(value)),
+            "analyzed_row_count": int(value.attrs.get("analyzed_row_count") or len(value)),
             "rows": _json_safe(
                 frame.to_dict(orient="records"),
                 depth=depth + 1,
@@ -1295,6 +1429,8 @@ def _json_safe(
             "name": str(value.name) if value.name is not None else None,
             "length": int(len(value)),
             "dtype": str(value.dtype),
+            "source_row_count": int(len(value)),
+            "analyzed_row_count": int(len(value)),
             "values": _json_safe(
                 series.tolist(),
                 depth=depth + 1,
@@ -1310,6 +1446,8 @@ def _json_safe(
             "type": "ndarray",
             "shape": [int(item) for item in value.shape],
             "dtype": str(value.dtype),
+            "source_row_count": int(value.shape[0]) if value.ndim > 0 else 1,
+            "analyzed_row_count": int(value.shape[0]) if value.ndim > 0 else 1,
             "sample": _json_safe(
                 sample,
                 depth=depth + 1,
@@ -1438,6 +1576,40 @@ def _safe_repr(value: Any, max_length: int = MAX_PREVIEW_STRING_LENGTH) -> str:
     except Exception:
         text = f"<unrepresentable {type(value).__qualname__}>"
     return _truncate_preview_string(text, max_length)
+
+
+def _type_name(value: type[Any]) -> str:
+    if value.__module__ == "builtins":
+        return value.__qualname__
+    return f"{value.__module__}.{value.__qualname__}"
+
+
+def _profile_row_count(profile: Mapping[str, Any] | None) -> int | None:
+    if not profile:
+        return None
+    shape = profile.get("shape")
+    if isinstance(shape, Sequence) and not isinstance(shape, (str, bytes)) and shape:
+        first = shape[0]
+        if isinstance(first, (int, float)) and not isinstance(first, bool):
+            return int(first)
+    length = profile.get("length")
+    if isinstance(length, (int, float)) and not isinstance(length, bool):
+        return int(length)
+    return None
+
+
+def _version_metadata(version: VersionNode | None) -> dict[str, Any] | None:
+    if version is None:
+        return None
+    return {
+        "version_id": version.id,
+        "dataset_id": version.dataset_id,
+        "branch_id": version.branch_id,
+        "parent_version_id": version.parent_version_id,
+        "summary": version.mutation_summary or version.label,
+        "created_at": version.created_at.isoformat(),
+        "row_count": _profile_row_count(version.profile),
+    }
 
 
 def _truncate_preview_string(value: str, max_length: int) -> str:

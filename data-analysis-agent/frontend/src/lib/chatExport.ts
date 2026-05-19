@@ -57,7 +57,7 @@ export function buildChatTranscriptMarkdown(messages: ChatMessage[], options: Ch
       lines.push("_No final answer recorded._", "");
     }
 
-    if (message.stateChanged !== undefined) {
+    if (message.stateChanged !== undefined && !message.finalAnswer?.toLowerCase().includes("state changed")) {
       lines.push(`State changed: ${message.stateChanged ? "yes" : "no"}`, "");
     }
 

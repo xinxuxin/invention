@@ -169,7 +169,7 @@ class FakeAgentModelClient:
             if "save_table" in retry_instruction:
                 return _fake_tool_response(
                     "execute_python",
-                    {"code": "df = to_dataframe(data, limit=50)\nsave_table('Preview table', df.head(5))\npreview({'rows': len(df), 'columns': list(df.columns)})"},
+                    {"code": "df = to_dataframe(data, limit=None)\nsave_table('Preview table', df.head(5))\npreview({'rows': len(df), 'columns': list(df.columns), 'source_row_count': len(df), 'analyzed_row_count': len(df)})"},
                 )
             if "save_chart" in retry_instruction:
                 return _fake_tool_response("execute_python", {"code": _fake_chart_code()})
@@ -218,7 +218,7 @@ class FakeAgentModelClient:
             return _fake_tool_response(
                 "execute_python",
                 {
-                    "code": _fake_chart_code(),
+                    "code": _fake_chart_code(prompt),
                     "mutates_state": False,
                 },
             )
@@ -227,7 +227,7 @@ class FakeAgentModelClient:
             return _fake_tool_response(
                 "execute_python",
                 {
-                    "code": "df = to_dataframe(data, limit=50)\nsave_table('Preview table', df.head(5))\npreview({'rows': len(df), 'columns': list(df.columns)})",
+                    "code": "df = to_dataframe(data, limit=None)\nsave_table('Preview table', df.head(5))\npreview({'rows': len(df), 'columns': list(df.columns), 'source_row_count': len(df), 'analyzed_row_count': len(df)})",
                     "mutates_state": False,
                 },
             )
@@ -312,27 +312,45 @@ def _latest_user_request(input_items: list[dict[str, Any]]) -> str:
     return request.split("Respond by using", maxsplit=1)[0].strip()
 
 
-def _fake_chart_code() -> str:
+def _fake_chart_code(prompt: str = "") -> str:
+    request_text = json.dumps(prompt)
     return "\n".join(
         [
-            "if isinstance(data, pd.DataFrame) and len(data) > 0:",
-            "    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()",
-            "    label_cols = [col for col in data.columns if col not in numeric_cols]",
-            "    y = numeric_cols[0] if numeric_cols else data.columns[0]",
-            "    x = label_cols[0] if label_cols else data.columns[0]",
-            "    if x != y and numeric_cols:",
-            "        rows = data.groupby(x, dropna=False, as_index=False)[y].sum().head(10).to_dict('records')",
-            "    else:",
-            "        rows = data.head(10).reset_index().rename(columns={'index': 'row'}).to_dict('records')",
-            "        x = 'row'",
-            "    save_table('Chart source data', rows)",
-            "    save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': x, 'y': y, 'description': 'Deterministic test chart'})",
-            "    preview(rows)",
-            "else:",
+            f"request_text = {request_text}",
+            "df = to_dataframe(data, limit=None)",
+            "if len(df) == 0:",
             "    rows = [{'name': key, 'size': len(value) if hasattr(value, '__len__') else 1} for key, value in datasets.items()]",
-            "    save_table('Chart source data', rows)",
-            "    save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': 'name', 'y': 'size', 'description': 'Dataset sizes'})",
-            "    preview(rows)",
+            "    x, y, title = 'name', 'size', 'Dataset sizes'",
+            "elif 'filing_date' in df.columns and ('year' in request_text or 'filing' in request_text):",
+            "    dates = pd.to_datetime(df['filing_date'], errors='coerce')",
+            "    grouped = dates.dropna().dt.year.value_counts().sort_index().reset_index()",
+            "    grouped.columns = ['filing_year', 'record_count']",
+            "    rows = grouped.to_dict('records')",
+            "    x, y, title = 'filing_year', 'record_count', 'Filings by year'",
+            "elif 'country' in df.columns:",
+            "    grouped = df['country'].astype(str).value_counts().head(15).reset_index()",
+            "    grouped.columns = ['country', 'record_count']",
+            "    rows = grouped.to_dict('records')",
+            "    x, y, title = 'country', 'record_count', 'Patent records by country'",
+            "else:",
+            "    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()",
+            "    label_cols = [col for col in df.columns if col not in numeric_cols]",
+            "    y = numeric_cols[0] if numeric_cols else 'record_count'",
+            "    x = label_cols[0] if label_cols else 'row'",
+            "    if numeric_cols and label_cols:",
+            "        rows = df.groupby(x, dropna=False, as_index=False)[y].sum().head(10).to_dict('records')",
+            "    else:",
+            "        rows = df.head(10).reset_index().rename(columns={'index': 'row'}).to_dict('records')",
+            "        if 'record_count' not in rows[0]:",
+            "            rows = [{'row': row.get('row', index), 'record_count': 1} for index, row in enumerate(rows)]",
+            "        x, y = 'row', 'record_count'",
+            "    title = 'Dataset chart'",
+            "if not rows:",
+            "    rows = [{'name': key, 'size': len(value) if hasattr(value, '__len__') else 1} for key, value in datasets.items()]",
+            "    x, y, title = 'name', 'size', 'Dataset sizes'",
+            "save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': x, 'y': y, 'description': title + ' generated from the full active dataset'})",
+            "save_table('Chart source data', rows)",
+            "preview({'rows': rows[:20], 'source_row_count': len(df), 'analyzed_row_count': len(df)})",
         ]
     )
 
@@ -355,4 +373,3 @@ def _extract_text(response: Any) -> str | None:
             if text:
                 parts.append(str(text))
     return "\n".join(parts) if parts else None
-

@@ -767,6 +767,89 @@ def test_specific_destructive_prompt_can_proceed_to_confirmation(client: TestCli
     assert any(event["type"] == "confirmation_required" for event in events)
 
 
+def test_delete_last_entries_shortcut_confirms_and_approval_mutates(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient([_tool_response("execute_python", {"code": "raise RuntimeError('should not run')"})])
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "delete last 2 entries", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
+
+    assert fake.calls == 0
+    assert confirmation["operation_summary"] == "Delete the last 2 records from the current working dataset"
+    assert confirmation["current_row_count"] == 3
+    assert confirmation["new_row_count"] == 1
+    assert confirmation["affected_count"] == 2
+
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+
+    assert approve_response.status_code == 200
+    result_event = next(event for event in approve_response.json()["events"] if event["type"] == "code_result_summary")
+    assert result_event["ok"] is True
+    dataset_response = client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}")
+    assert dataset_response.json()["profile"]["shape"] == [1, 2]
+
+
+def test_delete_empty_title_scans_full_dataset_and_confirms(client: TestClient) -> None:
+    session_response = client.post("/api/sessions", json={"name": "Delete title test"})
+    session_id = session_response.json()["id"]
+    dataset_id = _upload_frame(
+        client,
+        session_id,
+        "titles.pkl",
+        pd.DataFrame({"title": ["A", "", None, "D"], "country": ["US", "CA", "CN", "JP"]}),
+    )
+    fake = ScriptedModelClient([_tool_response("execute_python", {"code": "raise RuntimeError('should not run')"})])
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "delete empty title", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
+
+    assert fake.calls == 0
+    assert confirmation["affected_count"] == 2
+    assert confirmation["current_row_count"] == 4
+    assert confirmation["new_row_count"] == 2
+
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+    dataset_response = client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}")
+
+    assert approve_response.status_code == 200
+    assert dataset_response.json()["profile"]["shape"] == [2, 2]
+
+
+def test_delete_empty_title_zero_matches_reports_full_scan_no_mutation(client: TestClient) -> None:
+    session_response = client.post("/api/sessions", json={"name": "Delete title no-op"})
+    session_id = session_response.json()["id"]
+    dataset_id = _upload_frame(
+        client,
+        session_id,
+        "titles-ok.pkl",
+        pd.DataFrame({"title": ["A", "B"], "country": ["US", "CA"]}),
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "delete empty title", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    assert not any(event["type"] == "confirmation_required" for event in events)
+    assert "scanned all 2 records" in events[-2]["answer"].lower()
+    assert events[-2]["state_changed"] is False
+
+
 def test_mutation_history_shortcut_does_not_call_python(client: TestClient) -> None:
     session_id, dataset_id = _create_dataset(client)
     fake = ScriptedModelClient([_tool_response("execute_python", {"code": "history"})])

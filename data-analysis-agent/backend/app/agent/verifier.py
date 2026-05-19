@@ -42,6 +42,9 @@ MUTATION_MARKERS = (
     "drop",
     "remove",
     "delete",
+    "trim",
+    "keep only",
+    "exclude",
     "filter the working dataset",
     "persist",
     "mutate",
@@ -109,14 +112,28 @@ class ResultVerifier:
                 retry=retries_remaining,
             )
 
+        if _contains_wrapper_leak(execution_result, artifacts, final_answer_draft) and not _allows_internal_metadata(message):
+            return _retry(
+                "Internal wrapper fields leaked into the result.",
+                (
+                    "The result exposes wrapper columns or fields such as __dict__ or __pydantic metadata. "
+                    "Use safe_attrs/object_to_record/to_dataframe to flatten domain fields before answering."
+                ),
+            )
+
         invalid_helper_reason = _invalid_helper_usage_reason(latest_code, execution_result)
         if invalid_helper_reason:
-            return _retry(
-                invalid_helper_reason,
-                (
+            instruction = (
+                "Do not use `artifacts`; use `artifact_history` if injected, or recompute from data."
+                if "artifact" in invalid_helper_reason.lower()
+                else (
                     "Do not import helpers. Runtime helpers are injected directly. Do not rely on "
                     "variables from previous execute_python calls."
-                ),
+                )
+            )
+            return _retry(
+                invalid_helper_reason,
+                instruction,
                 hard_fail=False,
             )
 
@@ -129,6 +146,16 @@ class ResultVerifier:
                 )
             return _fail("Python execution failed and no retries remain.", hard_fail=False, retry=False)
 
+        if asks_for_mutation(message) and confirmation_status != "approved" and execution_result and execution_result.ok and not state_changed:
+            if not _full_scan_found_zero_matches(execution_result):
+                return _retry(
+                    "User requested a dataset mutation, but no confirmation or state change occurred.",
+                    (
+                        "This is a risky write request. Scan the full dataset if needed, then call "
+                        "request_confirmation with a clear operation summary and proposed mutation code."
+                    ),
+                )
+
         if asks_for_table(message) and not _has_artifact(artifacts, "table"):
             return _retry(
                 "User requested a table/preview, but no table artifact was created.",
@@ -139,6 +166,13 @@ class ResultVerifier:
             return _retry(
                 "User requested a chart, but no chart artifact was created.",
                 "User requested a chart. Create a chart artifact with save_chart(...).",
+            )
+
+        invalid_chart = _invalid_chart_artifact(artifacts)
+        if invalid_chart:
+            return _retry(
+                f"Chart artifact is invalid: {invalid_chart}.",
+                "Create a valid chart artifact with chart_spec.data as a non-empty list of objects and matching x/y keys.",
             )
 
         if asks_for_csv(message) and not _has_artifact(artifacts, "csv"):
@@ -155,6 +189,23 @@ class ResultVerifier:
                     "Table exposes wrapper columns. Use object_to_record/to_dataframe to flatten to "
                     "domain fields such as country, title, owners, assignees, status."
                 ),
+            )
+
+        if _schema_request_quality_failed(message, execution_result, final_answer_draft):
+            return _retry(
+                "Schema result does not describe real domain fields.",
+                (
+                    "For schema requests, use to_dataframe(data, limit=None) or objects_to_records(data, limit=None), "
+                    "then group real fields such as country, title, owners, assignees, filing_date, and status into "
+                    "scalar/date/list-like categories."
+                ),
+            )
+
+        sample_issue = _sample_only_analysis_issue(message, execution_result, artifacts, latest_code)
+        if sample_issue:
+            return _retry(
+                sample_issue,
+                "Use to_dataframe(data, limit=None) or objects_to_records(data, limit=None) for full dataset analysis.",
             )
 
         if _has_stringified_structured_fields(artifacts, execution_result):
@@ -369,6 +420,172 @@ def _has_stringified_structured_fields(
     return False
 
 
+def _contains_wrapper_leak(
+    result: ExecutionResult | None,
+    artifacts: Sequence[ExecutionArtifact],
+    final_answer: str | None,
+) -> bool:
+    if final_answer and any(marker in final_answer for marker in WRAPPER_COLUMNS | {"'attrs':", '"attrs"'}):
+        return True
+    if result and result.result_preview is not None and _contains_forbidden_key_or_value(result.result_preview):
+        return True
+    for artifact in artifacts:
+        if _contains_forbidden_key_or_value(artifact.columns) or _contains_forbidden_key_or_value(artifact.rows):
+            return True
+        if _contains_forbidden_key_or_value(artifact.metadata):
+            return True
+    return False
+
+
+def _contains_forbidden_key_or_value(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if str(key) in WRAPPER_COLUMNS or str(key) == "attrs":
+                return True
+            if _contains_forbidden_key_or_value(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_contains_forbidden_key_or_value(item) for item in value[:50])
+    if isinstance(value, str):
+        return any(marker in value for marker in WRAPPER_COLUMNS) or "'attrs':" in value or '"attrs"' in value
+    return False
+
+
+def _allows_internal_metadata(message: str) -> bool:
+    return any(marker in message for marker in ("internal", "wrapper", "pydantic", "__dict__", "raw object metadata"))
+
+
+def _schema_request_quality_failed(
+    message: str,
+    result: ExecutionResult | None,
+    final_answer: str | None,
+) -> bool:
+    if not _asks_for_schema_groups(message):
+        return False
+    if result and result.result_preview is not None:
+        fields = _schema_domain_fields(result.result_preview)
+        if fields and _has_domain_schema_fields(fields):
+            return False
+        return True
+    if final_answer:
+        lowered = final_answer.lower()
+        groups = sum(1 for marker in ("scalar", "date", "list") if marker in lowered)
+        if groups < 2:
+            return True
+        if any(marker in lowered for marker in ("__pydantic", "__dict__", "attrs")):
+            return True
+    return False
+
+
+def _asks_for_schema_groups(message: str) -> bool:
+    return "schema" in message or "scalar" in message or "date fields" in message or "list-like" in message
+
+
+def _schema_domain_fields(value: Any) -> set[str]:
+    fields: set[str] = set()
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if str(key).endswith("_fields") and isinstance(item, list):
+                fields.update(str(field) for field in item)
+            elif isinstance(item, Mapping | list):  # type: ignore[operator]
+                fields.update(_schema_domain_fields(item))
+    elif isinstance(value, list):
+        for item in value[:20]:
+            fields.update(_schema_domain_fields(item))
+    return {field for field in fields if field not in WRAPPER_COLUMNS}
+
+
+def _has_domain_schema_fields(fields: set[str]) -> bool:
+    domain_markers = {"country", "title", "owners", "assignees", "filing_date", "status", "doc_number"}
+    return len(fields & domain_markers) >= 2
+
+
+def _sample_only_analysis_issue(
+    message: str,
+    result: ExecutionResult | None,
+    artifacts: Sequence[ExecutionArtifact],
+    latest_code: str | None,
+) -> str | None:
+    if not _asks_for_full_dataset_analysis(message):
+        return None
+    code = latest_code or ""
+    if re.search(r"(to_dataframe|objects_to_records)\(\s*data\s*,\s*limit\s*=\s*(?:20|50|100|500)\b", code):
+        return "Full-dataset analysis used a row limit."
+    for artifact in artifacts:
+        analyzed = _numeric_meta(artifact.metadata, "analyzed_row_count")
+        source = _numeric_meta(artifact.metadata, "source_row_count")
+        if source is not None and analyzed is not None and analyzed < source:
+            return "Artifact was created from a sampled subset instead of the full dataset."
+    if result and isinstance(result.result_preview, Mapping):
+        analyzed = _numeric_meta(result.result_preview, "analyzed_row_count")
+        source = _numeric_meta(result.result_preview, "source_row_count") or _numeric_meta(result.result_preview, "total_row_count")
+        if source is not None and analyzed is not None and analyzed < source:
+            return "Result was computed from a sampled subset instead of the full dataset."
+    return None
+
+
+def _asks_for_full_dataset_analysis(message: str) -> bool:
+    return any(
+        marker in message
+        for marker in (
+            "top countries",
+            "count",
+            "distribution",
+            "breakdown",
+            "date range",
+            "filings by year",
+            "number of patent records",
+        )
+    ) and "sample" not in message
+
+
+def _numeric_meta(value: Mapping[str, Any], key: str) -> int | None:
+    item = value.get(key)
+    if isinstance(item, (int, float)) and not isinstance(item, bool):
+        return int(item)
+    return None
+
+
+def _invalid_chart_artifact(artifacts: Sequence[ExecutionArtifact]) -> str | None:
+    for artifact in artifacts:
+        if artifact.kind != "chart":
+            continue
+        spec = artifact.chart_spec or artifact.metadata.get("chart_spec")
+        if not isinstance(spec, Mapping):
+            return "missing chart_spec"
+        chart_type = spec.get("chart_type")
+        if chart_type not in {"bar", "line", "pie", "scatter", "area"}:
+            return f"unsupported chart_type {chart_type!r}"
+        data = spec.get("data")
+        if not isinstance(data, list) or not data or not isinstance(data[0], Mapping):
+            return "chart_spec.data is empty or not rows"
+        x = spec.get("x")
+        y = spec.get("y")
+        if not isinstance(x, str) or x not in data[0]:
+            return "x field missing from chart data"
+        if not isinstance(y, str) or y not in data[0]:
+            return "y field missing from chart data"
+        if chart_type in {"bar", "line", "area", "scatter", "pie"}:
+            sample_y = next((row.get(y) for row in data if isinstance(row, Mapping) and row.get(y) is not None), None)
+            if sample_y is not None and not isinstance(sample_y, (int, float)) and chart_type != "pie":
+                return "y field should be numeric"
+    return None
+
+
+def _full_scan_found_zero_matches(result: ExecutionResult) -> bool:
+    preview = result.result_preview
+    if not isinstance(preview, Mapping):
+        return False
+    affected = None
+    for key in ("affected_count", "empty_title_count", "deleted_count"):
+        if key in preview:
+            affected = preview.get(key)
+            break
+    full_scan = preview.get("full_scan") or preview.get("scanned_full_dataset")
+    return affected == 0 and bool(full_scan)
+
+
 def _iter_values(value: Any) -> list[Any]:
     if isinstance(value, Mapping):
         values: list[Any] = []
@@ -412,7 +629,10 @@ def _invalid_helper_usage_reason(code: str | None, result: ExecutionResult | Non
         'No module named "helpers"',
         "globals is not defined",
         "NameError: name 'columns' is not defined",
+        "NameError: name 'artifacts' is not defined",
     )
+    if "NameError: name 'artifacts' is not defined" in text:
+        return "Undefined artifact variable used."
     return "Invalid helper import or isolated-execution variable reuse detected." if any(marker in text for marker in markers) else None
 
 

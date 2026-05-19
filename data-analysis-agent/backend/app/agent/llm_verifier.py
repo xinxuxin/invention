@@ -31,8 +31,8 @@ class LLMVerifier:
         current_step: int,
         turn_started_at: float,
     ) -> tuple[LLMVerificationResult | None, str | None]:
-        if not self._allowed(deterministic_result, current_step, turn_started_at):
-            return None, self._skip_reason(deterministic_result, current_step, turn_started_at)
+        if not self._allowed(user_message, deterministic_result, current_step, turn_started_at):
+            return None, self._skip_reason(user_message, deterministic_result, current_step, turn_started_at)
 
         try:
             return self.verify(
@@ -103,6 +103,7 @@ class LLMVerifier:
 
     def _allowed(
         self,
+        user_message: str,
         deterministic_result: VerificationResult,
         current_step: int,
         turn_started_at: float,
@@ -118,10 +119,13 @@ class LLMVerifier:
             return False
         if current_step > self.settings.verifier_skip_llm_after_step:
             return False
+        if _semantic_verification_priority(user_message):
+            return True
         return time.monotonic() - turn_started_at <= self.settings.verifier_time_budget_per_turn_seconds
 
     def _skip_reason(
         self,
+        user_message: str,
         deterministic_result: VerificationResult,
         current_step: int,
         turn_started_at: float,
@@ -137,7 +141,10 @@ class LLMVerifier:
             return None
         if current_step > self.settings.verifier_skip_llm_after_step:
             return "Skipping LLM verifier to keep response fast."
-        if time.monotonic() - turn_started_at > self.settings.verifier_time_budget_per_turn_seconds:
+        if (
+            time.monotonic() - turn_started_at > self.settings.verifier_time_budget_per_turn_seconds
+            and not _semantic_verification_priority(user_message)
+        ):
             return "Skipping LLM verifier to keep response fast."
         return None
 
@@ -196,6 +203,11 @@ class LLMVerifier:
 def _deterministic_retry_is_authoritative(result: VerificationResult) -> bool:
     text = " ".join([*result.reasons, result.retry_instruction or ""]).lower()
     return any(marker in text for marker in ("table artifact", "chart artifact", "csv artifact", "wrapper columns", "state changed"))
+
+
+def _semantic_verification_priority(user_message: str) -> bool:
+    lowered = user_message.lower()
+    return any(marker in lowered for marker in ("schema", "scalar", "date fields", "list-like", "what is in this file"))
 
 
 def _parse_llm_json(text: str) -> dict[str, Any]:

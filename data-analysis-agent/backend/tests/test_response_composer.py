@@ -41,6 +41,64 @@ def test_inspection_answer_summarizes_preview_without_raw_dict() -> None:
     assert answer.markdown.count("State changed") == 1
 
 
+def test_inspection_type_object_preview_uses_clean_type_name() -> None:
+    result = ExecutionResult(
+        ok=True,
+        stdout="",
+        stderr="",
+        traceback=None,
+        result_preview={
+            "type": {
+                "type": "type",
+                "module": "builtins",
+                "repr": "<class 'list'>",
+                "attrs": {"append": "<method>"},
+            },
+            "length": 24410,
+            "sample": [{"country": "CA", "title": "CLEANING ROBOT", "owners": ["Softbank"]}],
+        },
+    )
+
+    answer = ResponseComposer().compose(
+        user_message="What is in this file?",
+        execution_result=result,
+        artifacts=[],
+        verification=_pass(),
+        state_changed=False,
+    )
+
+    assert "Object type: list" in answer.markdown
+    assert "attrs" not in answer.markdown
+    assert "{'type':" not in answer.markdown
+
+
+def test_schema_answer_groups_domain_fields() -> None:
+    result = ExecutionResult(
+        ok=True,
+        stdout="",
+        stderr="",
+        traceback=None,
+        result_preview={
+            "scalar_fields": ["country", "title", "status"],
+            "date_fields": ["filing_date"],
+            "list_like_fields": ["owners", "assignees"],
+        },
+    )
+
+    answer = ResponseComposer().compose(
+        user_message="Which fields are scalar fields, dates, and list-like fields?",
+        execution_result=result,
+        artifacts=[],
+        verification=_pass(),
+        state_changed=False,
+    )
+
+    assert "Scalar fields: country, title, status" in answer.markdown
+    assert "Date-like fields: filing_date" in answer.markdown
+    assert "List-like fields: owners, assignees" in answer.markdown
+    assert "__pydantic" not in answer.markdown
+
+
 def test_read_only_operation_is_not_labeled_mutation() -> None:
     result = ExecutionResult(
         ok=True,

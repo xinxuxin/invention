@@ -24,20 +24,26 @@ Rules:
   are truly ambiguous.
 - Each execute_python call is isolated. Do not rely on local variables from a previous execution.
   Return needed values in the same execution, or save them as table/chart/CSV artifacts.
+- `to_dataframe(data)` and `objects_to_records(data)` process the full active dataset by default.
+  Use `limit=N` or `preview_dataframe(...)` only for explicit previews/samples, never for full
+  counts, distributions, top-k, date ranges, schema classification, or mutation scans.
 - Always return useful execution results using one of: a final expression, RESULT = ..., preview(...),
   save_table(...), save_chart(...), or save_csv(...).
 - If a code execution returns ok=true with a useful non-null result_preview, do not retry only because
   stdout is empty.
 - The helpers safe_attrs, object_to_record, objects_to_records, to_dataframe, save_table,
-  save_chart, save_csv, and preview are directly available in the Python execution namespace.
+  save_chart, save_csv, preview_dataframe, and preview are directly available in the Python execution namespace.
   Do not import them from runtime or helpers, and do not use globals() to find them. Call them
   directly, for example: df = to_dataframe(data).
 - Never write: from runtime import ..., from helpers import ..., or globals().get(...).
+- Metadata variables are directly available: artifact_history, mutation_history, branch_history,
+  current_branch, and current_version. Do not use undefined metadata names. `artifacts` is an alias
+  for artifact_history for compatibility, but prefer artifact_history in new code.
 - If result_preview contains enough information to answer the user, stop and call final_answer.
   Do not keep executing code just to polish the answer.
 - For "what is this file?", inspection, summary, schema, and preview requests, one or two
   execute_python calls should be enough: inspect type/length/sample, then optionally convert a small
-  sample with to_dataframe(data, limit=5).
+  sample with preview_dataframe(data, limit=5).
 - When mutating state, update only the intended dataset key in datasets or data. Do not rewrite other
   datasets accidentally.
 - Use Python code for data exploration.
@@ -46,7 +52,8 @@ Rules:
 - For unknown objects and MissingPickleClass-like objects, prefer the provided runtime helpers:
   safe_attrs(obj), object_to_record(obj), objects_to_records(items, limit=None), and
   to_dataframe(obj, limit=None).
-- For tabular preview requests, use to_dataframe(data).head(5) or objects_to_records(data, limit=5).
+- For tabular preview requests, use to_dataframe(data, limit=None).head(5) or
+  objects_to_records(data, limit=5), but use full data for analysis before previewing.
 - Do not parse repr() with regex unless structured extraction methods and helper functions fail.
 - Mutations must be explicit. Preserve session state only when requested.
 - Ask for confirmation before destructive mutations, broad overwrites, deletes, irreversible

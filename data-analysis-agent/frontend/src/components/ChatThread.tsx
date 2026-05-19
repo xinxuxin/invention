@@ -501,6 +501,13 @@ function ConfirmationCard({
               value={pending.reversible === false ? "Not automatically reversible" : "Rollback available"}
             />
           </div>
+          {pending.currentRowCount !== undefined && pending.currentRowCount !== null ? (
+            <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
+              <RiskMetric label="Current rows" value={pending.currentRowCount.toLocaleString()} />
+              <RiskMetric label="New rows" value={(pending.newRowCount ?? pending.currentRowCount).toLocaleString()} />
+              <RiskMetric label="Affected rows" value={(pending.affectedCount ?? 0).toLocaleString()} />
+            </div>
+          ) : null}
           {pending.rollbackNote ? (
             <p className="mt-3 rounded-md border border-amber-200 bg-white/60 p-3 text-xs leading-5 text-amber-950/75">
               {pending.rollbackNote}

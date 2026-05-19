@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   flexRender,
   getCoreRowModel,
@@ -17,7 +17,6 @@ import {
   LineChart,
   Pie,
   PieChart,
-  ResponsiveContainer,
   Scatter,
   ScatterChart,
   Tooltip,
@@ -313,6 +312,9 @@ function ChartPreview({ spec, fallback }: { spec: unknown; fallback?: unknown })
   const chart = parseChartSpec(spec) ?? parseChartSpec(fallback);
 
   if (!chart) {
+    if (import.meta.env.DEV) {
+      console.warn("Invalid chart artifact spec", spec ?? fallback);
+    }
     return <ChartError spec={spec ?? fallback} />;
   }
 
@@ -333,12 +335,44 @@ function ChartPreview({ spec, fallback }: { spec: unknown; fallback?: unknown })
           Export data
         </button>
       </div>
-      <div className="h-72 rounded-md border border-border bg-white p-3">
-        <ResponsiveContainer width="100%" height="100%">
-          <RenderedChart chart={chart} />
-        </ResponsiveContainer>
-      </div>
+      <ChartCanvas chart={chart} />
       <DataTable rows={chart.data.slice(0, 8)} />
+    </div>
+  );
+}
+
+function ChartCanvas({ chart }: { chart: ChartSpec }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState(640);
+  const height = 250;
+
+  useLayoutEffect(() => {
+    const updateWidth = () => {
+      const nextWidth = containerRef.current?.getBoundingClientRect().width ?? 0;
+      setWidth(Math.max(360, Math.floor(nextWidth - 24) || 640));
+    };
+
+    updateWidth();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" || !containerRef.current
+        ? null
+        : new ResizeObserver(updateWidth);
+    if (resizeObserver && containerRef.current) {
+      resizeObserver.observe(containerRef.current);
+    }
+    window.addEventListener("resize", updateWidth);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateWidth);
+    };
+  }, []);
+
+  return (
+    <div
+      ref={containerRef}
+      className="h-72 min-h-[280px] overflow-x-auto rounded-md border border-border bg-white p-3"
+    >
+      <RenderedChart chart={chart} width={width} height={height} />
     </div>
   );
 }
@@ -371,14 +405,14 @@ type ChartSpec = {
   description?: string | null;
 };
 
-function RenderedChart({ chart }: { chart: ChartSpec }) {
+function RenderedChart({ chart, width, height }: { chart: ChartSpec; width: number; height: number }) {
   const stroke = "#0f766e";
   const fill = "#14b8a6";
   const legend = chart.series ? <Legend /> : null;
 
   if (chart.chart_type === "line") {
     return (
-      <LineChart data={chart.data}>
+      <LineChart width={width} height={height} data={chart.data}>
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis dataKey={chart.x} />
         <YAxis />
@@ -391,7 +425,7 @@ function RenderedChart({ chart }: { chart: ChartSpec }) {
 
   if (chart.chart_type === "area") {
     return (
-      <AreaChart data={chart.data}>
+      <AreaChart width={width} height={height} data={chart.data}>
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis dataKey={chart.x} />
         <YAxis />
@@ -404,7 +438,7 @@ function RenderedChart({ chart }: { chart: ChartSpec }) {
 
   if (chart.chart_type === "pie") {
     return (
-      <PieChart>
+      <PieChart width={width} height={height}>
         <Tooltip />
         <Legend />
         <Pie data={chart.data} dataKey={chart.y} nameKey={chart.x} outerRadius="82%" label>
@@ -418,7 +452,7 @@ function RenderedChart({ chart }: { chart: ChartSpec }) {
 
   if (chart.chart_type === "scatter") {
     return (
-      <ScatterChart>
+      <ScatterChart width={width} height={height}>
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis dataKey={chart.x} name={chart.x} />
         <YAxis dataKey={chart.y} name={chart.y} />
@@ -430,7 +464,7 @@ function RenderedChart({ chart }: { chart: ChartSpec }) {
   }
 
   return (
-    <BarChart data={chart.data}>
+    <BarChart width={width} height={height} data={chart.data}>
       <CartesianGrid strokeDasharray="3 3" />
       <XAxis dataKey={chart.x} />
       <YAxis />

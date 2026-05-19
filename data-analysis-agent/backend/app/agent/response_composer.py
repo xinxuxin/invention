@@ -181,8 +181,10 @@ def _findings_from_preview(preview: Any) -> list[str]:
             return schema_findings
         simple = []
         for key, value in list(preview.items())[:5]:
+            if str(key).startswith("__") or str(key) == "attrs":
+                continue
             if isinstance(value, (str, int, float, bool)) or value is None:
-                simple.append(f"{key}: {value}")
+                simple.append(f"{key}: {_format_scalar(value)}")
             elif isinstance(value, list):
                 simple.append(f"{key}: {len(value)} item{'s' if len(value) != 1 else ''}")
         return simple
@@ -274,7 +276,7 @@ def _structural_findings(preview: Mapping[str, Any]) -> list[str]:
     findings: list[str] = []
     object_type = preview.get("object_type") or preview.get("type")
     if object_type and object_type != "dataframe":
-        findings.append(f"Object type: {object_type}.")
+        findings.append(f"Object type: {_display_object_type(object_type)}.")
 
     length = (
         preview.get("length")
@@ -315,6 +317,31 @@ def _representative_fields(preview: Mapping[str, Any]) -> list[str]:
     if isinstance(keys, list):
         return [str(key) for key in keys]
     return []
+
+
+def _display_object_type(value: Any) -> str:
+    if isinstance(value, str):
+        return _clean_type_repr(value)
+    if isinstance(value, Mapping):
+        raw = value.get("repr") or value.get("name") or value.get("type")
+        if isinstance(raw, str):
+            return _clean_type_repr(raw)
+    return _clean_type_repr(str(value))
+
+
+def _clean_type_repr(value: str) -> str:
+    stripped = value.strip()
+    if stripped.startswith("<class '") and stripped.endswith("'>"):
+        stripped = stripped.removeprefix("<class '").removesuffix("'>")
+    if "." in stripped:
+        stripped = stripped.split(".")[-1]
+    return stripped.strip("'\"")
+
+
+def _format_scalar(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return _display_object_type(value) if "repr" in value or "type" in value else "object"
+    return str(value)
 
 
 def _schema_findings(preview: Mapping[str, Any]) -> list[str]:
@@ -361,7 +388,7 @@ def _schema_groups(preview: Mapping[str, Any]) -> dict[str, list[str]]:
     for source, target in explicit_map.items():
         value = preview.get(source)
         if isinstance(value, list):
-            grouped[target].extend(str(item) for item in value)
+            grouped[target].extend(str(item) for item in value if not _is_wrapper_field(str(item)))
 
     for key, value in preview.items():
         if key in {
@@ -383,6 +410,8 @@ def _schema_groups(preview: Mapping[str, Any]) -> dict[str, list[str]]:
         }:
             continue
         if isinstance(value, str):
+            if _is_wrapper_field(str(key)):
+                continue
             lowered = value.lower()
             if "list" in lowered:
                 grouped["list"].append(str(key))
@@ -396,6 +425,10 @@ def _schema_groups(preview: Mapping[str, Any]) -> dict[str, list[str]]:
                 grouped["scalar"].append(str(key))
 
     return {key: _dedupe(values) for key, values in grouped.items() if values}
+
+
+def _is_wrapper_field(value: str) -> bool:
+    return value in {"__dict__", "__pydantic_extra__", "__pydantic_fields_set__", "__pydantic_private__", "attrs"}
 
 
 def _dedupe(values: list[str]) -> list[str]:
