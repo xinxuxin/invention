@@ -53,6 +53,7 @@ export function DatasetCard({ dataset, active, onSelect }: DatasetCardProps) {
           </span>
           <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span>{dataset.object_type}</span>
+            <span className="font-mono text-[11px] text-slate-500">{dataset.dataset_key}</span>
             {metric ? <span className="font-semibold text-slate-700">{metric}</span> : null}
           </span>
           {previewItems.length > 0 ? (

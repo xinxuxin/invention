@@ -29,6 +29,10 @@ def _migrate_sqlite() -> None:
     additions = {
         "analysis_sessions": {
             "active_branch_id": "TEXT",
+            "active_dataset_id": "TEXT",
+        },
+        "datasets": {
+            "dataset_key": "TEXT",
         },
         "branches": {
             "current_version_id": "TEXT",

@@ -143,6 +143,27 @@ def test_upload_multiple_pickle_files(client: TestClient) -> None:
     assert len(listed.json()["datasets"]) == 2
 
 
+def test_dataset_keys_are_safe_unique_and_active_dataset_can_change(client: TestClient) -> None:
+    session_id = _create_session(client)
+    files = [
+        ("files", ("Revenue 2026.pkl", cloudpickle.dumps({"a": 1}), "application/octet-stream")),
+        ("files", ("Revenue 2026.pkl", cloudpickle.dumps({"b": 2}), "application/octet-stream")),
+    ]
+
+    upload = client.post(f"/api/sessions/{session_id}/datasets", files=files)
+    assert upload.status_code == 201
+
+    datasets = upload.json()["datasets"]
+    assert [dataset["dataset_key"] for dataset in datasets] == ["revenue_2026", "revenue_2026_2"]
+
+    activate = client.post(f"/api/sessions/{session_id}/datasets/{datasets[1]['id']}/activate")
+    assert activate.status_code == 200
+    assert activate.json()["active_dataset_id"] == datasets[1]["id"]
+
+    fetched = client.get(f"/api/sessions/{session_id}")
+    assert fetched.json()["active_dataset_id"] == datasets[1]["id"]
+
+
 def _create_session(client: TestClient) -> str:
     response = client.post("/api/sessions", json={})
     assert response.status_code == 201

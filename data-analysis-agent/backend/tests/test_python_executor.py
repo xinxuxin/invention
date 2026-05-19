@@ -99,7 +99,7 @@ def test_dataset_assignment_mutation_creates_new_version(db_session: Session) ->
 
     result = executor.execute(
         session_id,
-        "datasets['frame.pkl'] = data.assign(offset=data['value'] + 10)",
+        "datasets['frame'] = data.assign(offset=data['value'] + 10)",
         active_dataset_id=dataset_id,
         mutates_state=True,
     )
@@ -110,6 +110,37 @@ def test_dataset_assignment_mutation_creates_new_version(db_session: Session) ->
     assert result.ok is True
     assert len(result.updated_datasets) == 1
     assert "offset" in persisted.columns
+
+
+def test_multi_dataset_mutation_updates_only_target_dataset(db_session: Session) -> None:
+    session_id, first_id, second_id = _create_two_datasets(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "print(sorted(datasets.keys()))\ndata = data.assign(double=data['value'] * 2)\npreview(datasets)",
+        active_dataset_id=first_id,
+        mutates_state=True,
+        mutation_summary="Mutate first dataset only",
+    )
+
+    first = db_session.get(Dataset, first_id)
+    second = db_session.get(Dataset, second_id)
+    first_versions = db_session.exec(select(VersionNode).where(VersionNode.dataset_id == first_id)).all()
+    second_versions = db_session.exec(select(VersionNode).where(VersionNode.dataset_id == second_id)).all()
+    first_persisted = load_pickle(Path(first.current_snapshot_path))
+    second_persisted = load_pickle(Path(second.current_snapshot_path))
+    mutation_version = next(version for version in first_versions if version.id == result.updated_datasets[0].version_id)
+
+    assert result.ok is True
+    assert result.updated_datasets[0].dataset_id == first_id
+    assert "first_frame" in result.stdout
+    assert "second_frame" in result.stdout
+    assert "double" in first_persisted.columns
+    assert "double" not in second_persisted.columns
+    assert len(first_versions) == 2
+    assert len(second_versions) == 1
+    assert mutation_version.parent_version_id != second.current_version_id
 
 
 def test_exceptions_return_traceback(db_session: Session) -> None:
@@ -250,6 +281,7 @@ def _create_dataset(
     dataset = Dataset(
         id=dataset_id,
         session_id=analysis_session.id,
+        dataset_key=Path(filename).stem.replace("-", "_"),
         original_filename=filename,
         object_type=profile["object_type"],
         module=profile["module"],
@@ -271,6 +303,7 @@ def _create_dataset(
     branch.root_version_id = version_id
     branch.current_version_id = version_id
     analysis_session.active_branch_id = branch.id
+    analysis_session.active_dataset_id = dataset_id
 
     db_session.add(analysis_session)
     db_session.add(branch)
@@ -279,3 +312,75 @@ def _create_dataset(
     db_session.commit()
 
     return analysis_session.id, dataset_id
+
+
+def _create_two_datasets(db_session: Session) -> tuple[str, str, str]:
+    analysis_session = AnalysisSession(name="Multi runtime test")
+    branch = Branch(session_id=analysis_session.id, name="main")
+    db_session.add(analysis_session)
+    db_session.add(branch)
+
+    first_id, first_version = _add_dataset_row(
+        db_session,
+        analysis_session.id,
+        branch.id,
+        "first-frame.pkl",
+        "first_frame",
+        pd.DataFrame({"value": [1, 2], "group": ["a", "b"]}),
+    )
+    second_id, second_version = _add_dataset_row(
+        db_session,
+        analysis_session.id,
+        branch.id,
+        "second-frame.pkl",
+        "second_frame",
+        pd.DataFrame({"value": [10, 20], "kind": ["x", "y"]}),
+    )
+    branch.root_version_id = first_version
+    branch.current_version_id = second_version
+    analysis_session.active_branch_id = branch.id
+    analysis_session.active_dataset_id = first_id
+    db_session.add(branch)
+    db_session.add(analysis_session)
+    db_session.commit()
+
+    return analysis_session.id, first_id, second_id
+
+
+def _add_dataset_row(
+    db_session: Session,
+    session_id: str,
+    branch_id: str,
+    filename: str,
+    dataset_key: str,
+    value: pd.DataFrame,
+) -> tuple[str, str]:
+    dataset_id = new_id()
+    version_id = new_id()
+    snapshot_path = save_snapshot(session_id, dataset_id, version_id, value)
+    profile = introspect_object(value)
+    dataset = Dataset(
+        id=dataset_id,
+        session_id=session_id,
+        dataset_key=dataset_key,
+        original_filename=filename,
+        object_type=profile["object_type"],
+        module=profile["module"],
+        original_path=str(snapshot_path),
+        current_snapshot_path=str(snapshot_path),
+        current_version_id=version_id,
+        profile=profile,
+    )
+    version = VersionNode(
+        id=version_id,
+        dataset_id=dataset_id,
+        branch_id=branch_id,
+        parent_version_id=None,
+        label="initial",
+        mutation_summary="Initial upload",
+        snapshot_path=str(snapshot_path),
+        profile=profile,
+    )
+    db_session.add(dataset)
+    db_session.add(version)
+    return dataset_id, version_id

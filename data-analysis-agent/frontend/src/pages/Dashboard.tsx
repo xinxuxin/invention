@@ -187,7 +187,7 @@ export function Dashboard() {
                 <div>
                   <p className="text-sm font-medium text-muted-foreground">
                     {workspace.activeDataset
-                      ? `Active dataset: ${workspace.activeDataset.original_filename}`
+                      ? `Active dataset: ${workspace.activeDataset.original_filename} (${workspace.activeDataset.dataset_key})`
                       : "Waiting for a dataset"}
                   </p>
                   <h2 className="mt-1 text-2xl font-bold">Chat with your data runtime</h2>

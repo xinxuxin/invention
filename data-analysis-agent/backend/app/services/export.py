@@ -38,7 +38,7 @@ def export_dataset_csv(
     if session is None:
         raise ValueError("Session not found")
 
-    dataset = _resolve_dataset(db, session_id, dataset_id)
+    dataset = _resolve_dataset(db, session, dataset_id)
     version = _resolve_version(db, dataset, version_id)
     value = load_pickle(Path(version.snapshot_path))
 
@@ -154,14 +154,19 @@ def _sequence_to_dataframe(value: Sequence[Any]) -> pd.DataFrame:
     return pd.json_normalize(normalized_items)
 
 
-def _resolve_dataset(db: Session, session_id: str, dataset_id: str | None) -> Dataset:
+def _resolve_dataset(db: Session, session: AnalysisSession, dataset_id: str | None) -> Dataset:
     if dataset_id:
         dataset = db.get(Dataset, dataset_id)
-        if dataset is None or dataset.session_id != session_id:
+        if dataset is None or dataset.session_id != session.id:
             raise ValueError("Dataset not found")
         return dataset
 
-    dataset = db.exec(select(Dataset).where(Dataset.session_id == session_id)).first()
+    if session.active_dataset_id:
+        dataset = db.get(Dataset, session.active_dataset_id)
+        if dataset is not None and dataset.session_id == session.id:
+            return dataset
+
+    dataset = db.exec(select(Dataset).where(Dataset.session_id == session.id)).first()
     if dataset is None:
         raise ValueError("No dataset available to export")
     return dataset

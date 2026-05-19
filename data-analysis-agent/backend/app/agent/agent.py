@@ -18,6 +18,7 @@ from app.services.versioning import (
     active_branch,
     apply_version_to_dataset,
     checkout_branch,
+    dataset_key,
     latest_versions_for_branch,
     sync_branch_pointer,
 )
@@ -336,7 +337,8 @@ class CodingAgent:
                 raise ValueError(f"Branch not found: {branch_name}")
 
         datasets = list(self.db.exec(select(Dataset).where(Dataset.session_id == session_id)).all())
-        active_dataset = _active_dataset(datasets, active_dataset_id)
+        resolved_active_dataset_id = active_dataset_id or session.active_dataset_id
+        active_dataset = _active_dataset(datasets, resolved_active_dataset_id)
         version_ids = [dataset.current_version_id for dataset in datasets if dataset.current_version_id]
         versions = (
             list(self.db.exec(select(VersionNode).where(VersionNode.id.in_(version_ids))).all())
@@ -357,6 +359,7 @@ class CodingAgent:
         return {
             "session_id": session_id,
             "active_branch": {"id": branch.id, "name": branch.name},
+            "dataset_keys": [dataset_key(dataset) for dataset in datasets],
             "branches": [
                 {
                     "id": item.id,
@@ -367,9 +370,11 @@ class CodingAgent:
                 for item in branches
             ],
             "active_dataset_id": active_dataset.id if active_dataset else None,
+            "active_dataset_key": dataset_key(active_dataset) if active_dataset else None,
             "datasets": [
                 {
                     "id": dataset.id,
+                    "key": dataset_key(dataset),
                     "filename": dataset.original_filename,
                     "object_type": dataset.object_type,
                     "module": dataset.module,

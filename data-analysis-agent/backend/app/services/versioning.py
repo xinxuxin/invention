@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from pathlib import Path
+import re
 
 from sqlmodel import Session, select
 
@@ -36,6 +37,7 @@ def dataset_read(dataset: Dataset, version: VersionNode) -> DatasetRead:
     return DatasetRead(
         id=dataset.id,
         session_id=dataset.session_id,
+        dataset_key=dataset_key(dataset),
         original_filename=dataset.original_filename,
         object_type=dataset.object_type,
         module=dataset.module,
@@ -44,6 +46,30 @@ def dataset_read(dataset: Dataset, version: VersionNode) -> DatasetRead:
         created_at=dataset.created_at,
         updated_at=dataset.updated_at,
     )
+
+
+def dataset_key(dataset: Dataset) -> str:
+    value = getattr(dataset, "dataset_key", "") or ""
+    return value or safe_dataset_key(dataset.original_filename) or dataset.id
+
+
+def safe_dataset_key(filename: str) -> str:
+    stem = Path(filename).stem or filename or "dataset"
+    key = re.sub(r"[^0-9a-zA-Z_]+", "_", stem.strip()).strip("_").lower()
+    if key and key[0].isdigit():
+        key = f"dataset_{key}"
+    return key or "dataset"
+
+
+def unique_dataset_key(filename: str, used_keys: set[str]) -> str:
+    base = safe_dataset_key(filename)
+    candidate = base
+    suffix = 2
+    while candidate in used_keys:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used_keys.add(candidate)
+    return candidate
 
 
 def current_version(dataset: Dataset, db: Session) -> VersionNode:

@@ -92,3 +92,16 @@
 - Verified backend tests pass: `28 passed`.
 - Verified backend lint passes: `ruff check .`.
 - Verified frontend build passes: `npm run build`.
+- Started robust multi-dataset support phase.
+- Added persisted `active_dataset_id` to sessions and safe unique `dataset_key` values to datasets, with SQLite migration coverage and fallback key derivation for old demo rows.
+- Added `POST /api/sessions/{session_id}/datasets/{dataset_id}/activate` to persist active dataset selection.
+- Updated upload handling to assign safe unique keys such as `customers_2026` and `customers_2026_2`, and to initialize the active dataset when needed.
+- Updated executor dataset exposure so `datasets` contains every session dataset by safe key and `data` aliases the persisted/requested active dataset.
+- Fixed mutation persistence parent links so mutating one dataset uses that dataset's latest branch version instead of another dataset's latest branch node.
+- Updated agent context with `dataset_keys`, per-dataset keys, and `active_dataset_key`; prompt now tells the agent to inspect all datasets and avoid one-dataset assumptions.
+- Updated frontend workspace state to persist active dataset selection through the backend and show dataset keys in cards/chat context.
+- Added tests for key uniqueness, active dataset activation, multi-dataset executor mutation isolation, and agent context/executor access to multiple datasets.
+- Browser smoke-tested two uploaded datasets: both safe keys rendered, changing active dataset persisted, and chat context updated to the selected dataset.
+- Verified backend tests pass: `31 passed`.
+- Verified backend lint passes: `ruff check .`.
+- Verified frontend build passes: `npm run build`.

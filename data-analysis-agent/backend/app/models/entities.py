@@ -21,6 +21,7 @@ class AnalysisSession(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True)
     name: str | None = None
     active_branch_id: str | None = Field(default=None, foreign_key="branches.id")
+    active_dataset_id: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
     updated_at: datetime = Field(default_factory=utc_now, nullable=False)
 
@@ -41,6 +42,7 @@ class Dataset(SQLModel, table=True):
 
     id: str = Field(default_factory=new_id, primary_key=True)
     session_id: str = Field(foreign_key="analysis_sessions.id", index=True)
+    dataset_key: str = Field(default="", index=True)
     original_filename: str
     object_type: str
     module: str | None = None

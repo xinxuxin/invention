@@ -19,6 +19,7 @@ class SessionRead(BaseModel):
     id: str
     name: str | None
     active_branch_id: str | None
+    active_dataset_id: str | None
     created_at: datetime
     updated_at: datetime
     branches: list[BranchRead]

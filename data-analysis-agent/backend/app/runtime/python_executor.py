@@ -25,7 +25,7 @@ from app.models.entities import AnalysisSession, Branch, Dataset, VersionNode, n
 from app.schemas.artifact import ChartArtifactSpec
 from app.services.artifacts import persist_artifact
 from app.services.introspection import introspect_object
-from app.services.versioning import latest_versions_for_branch, sync_branch_pointer
+from app.services.versioning import dataset_key, latest_versions_for_branch, sync_branch_pointer
 from app.storage.files import load_pickle, save_snapshot
 
 DEFAULT_TIMEOUT_SECONDS = 5
@@ -100,7 +100,7 @@ class PythonExecutor:
 
         branch = self._get_branch(analysis_session, branch_name)
         loaded = self._load_session_datasets(session_id, branch)
-        active = self._resolve_active_dataset(loaded, active_dataset_id)
+        active = self._resolve_active_dataset(loaded, active_dataset_id or analysis_session.active_dataset_id)
 
         child_payload = self._run_in_child(code, loaded, active)
         if child_payload.get("timed_out"):
@@ -254,6 +254,7 @@ class PythonExecutor:
     ) -> list[UpdatedDataset]:
         updated: list[UpdatedDataset] = []
         values_by_dataset_id: dict[str, tuple[str, Any]] = {}
+        branch_versions = latest_versions_for_branch(branch.id, self.db)
 
         for dataset in loaded:
             if dataset.key in returned_datasets:
@@ -284,7 +285,11 @@ class PythonExecutor:
                 id=version_id,
                 dataset_id=dataset.row.id,
                 branch_id=branch.id,
-                parent_version_id=branch.current_version_id or dataset.row.current_version_id,
+                parent_version_id=(
+                    branch_versions.get(dataset.row.id).id
+                    if branch_versions.get(dataset.row.id)
+                    else dataset.row.current_version_id
+                ),
                 label="python execution",
                 snapshot_path=str(snapshot_path),
                 mutation_summary=mutation_summary,
@@ -775,13 +780,14 @@ def _fingerprint(value: Any) -> str:
 
 
 def _dataset_keys(rows: Sequence[Dataset]) -> dict[str, str]:
-    names = [row.original_filename for row in rows]
+    names = [dataset_key(row) for row in rows]
     duplicate_names = {name for name in names if names.count(name) > 1}
     keys: dict[str, str] = {}
     used: set[str] = set()
 
     for row in rows:
-        base = row.id if row.original_filename in duplicate_names else row.original_filename
+        row_key = dataset_key(row)
+        base = row.id if row_key in duplicate_names else row_key
         key = base
         if key in used:
             stem = Path(base).stem or "dataset"

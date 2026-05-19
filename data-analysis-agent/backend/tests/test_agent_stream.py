@@ -20,8 +20,10 @@ class ScriptedModelClient:
     def __init__(self, responses: list[AgentModelResponse]) -> None:
         self.responses = responses
         self.calls = 0
+        self.requests: list[dict[str, object]] = []
 
     def create_response(self, **_: object) -> AgentModelResponse:
+        self.requests.append(dict(_))
         if self.calls >= len(self.responses):
             raise AssertionError("No scripted model response left")
         response = self.responses[self.calls]
@@ -239,6 +241,45 @@ def test_chart_artifact_streams_with_valid_spec(client: TestClient) -> None:
     assert content["y"] == "value"
 
 
+def test_agent_context_and_executor_include_multiple_datasets(client: TestClient) -> None:
+    session_response = client.post("/api/sessions", json={"name": "Multi agent test"})
+    session_id = session_response.json()["id"]
+    customers_id = _upload_frame(
+        client,
+        session_id,
+        "Customers 2026.pkl",
+        pd.DataFrame({"customer_id": [1, 2], "segment": ["trial", "paid"]}),
+    )
+    _upload_frame(
+        client,
+        session_id,
+        "Orders 2026.pkl",
+        pd.DataFrame({"customer_id": [1, 2], "revenue": [100, 250]}),
+    )
+    fake = ScriptedModelClient(
+        [
+            _tool_response("execute_python", {"code": "print(sorted(datasets.keys()))\npreview(datasets)"}),
+            _tool_response("final_answer", {"answer": "Both datasets are available."}),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Compare these two datasets", "active_dataset_id": customers_id},
+    )
+    events = _parse_sse(response.text)
+    stdout = next(event["stdout"] for event in events if event["type"] == "code_result_summary")
+    first_input = json.dumps(fake.requests[0]["input_items"], default=str)
+
+    assert response.status_code == 200
+    assert "customers_2026" in stdout
+    assert "orders_2026" in stdout
+    assert "dataset_keys" in first_input
+    assert "active_dataset_key" in first_input
+    assert "customers_2026" in first_input
+
+
 def _tool_response(name: str, arguments: dict) -> AgentModelResponse:
     call_id = f"call-{name}-{new_id()}"
     return AgentModelResponse(
@@ -259,19 +300,23 @@ def _create_dataset(client: TestClient) -> tuple[str, str]:
     assert session_response.status_code == 201
     session_id = session_response.json()["id"]
     frame = pd.DataFrame({"value": [1, 2, 3], "group": ["a", "b", "a"]})
+    dataset_id = _upload_frame(client, session_id, "agent-frame.pkl", frame)
+    return session_id, dataset_id
+
+
+def _upload_frame(client: TestClient, session_id: str, filename: str, frame: pd.DataFrame) -> str:
     upload_response = client.post(
         f"/api/sessions/{session_id}/datasets",
         files={
             "files": (
-                "agent-frame.pkl",
+                filename,
                 cloudpickle.dumps(frame),
                 "application/octet-stream",
             )
         },
     )
     assert upload_response.status_code == 201
-    dataset_id = upload_response.json()["datasets"][0]["id"]
-    return session_id, dataset_id
+    return upload_response.json()["datasets"][0]["id"]
 
 
 def _parse_sse(payload: str) -> list[dict]:

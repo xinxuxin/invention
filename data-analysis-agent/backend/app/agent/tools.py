@@ -16,7 +16,7 @@ EXECUTE_PYTHON_TOOL = {
         "properties": {
             "code": {
                 "type": "string",
-                "description": "Python code to execute. Available names: datasets, data, pd, np, json, math, statistics, preview, save_table, save_chart, save_csv. save_chart expects title, chart_type, data, x, y, optional color/description.",
+                "description": "Python code to execute. Available names: datasets (all session datasets by safe unique key), data (active dataset alias), pd, np, json, math, statistics, preview, save_table, save_chart, save_csv. save_chart expects title, chart_type, data, x, y, optional color/description.",
             },
             "mutates_state": {
                 "type": "boolean",

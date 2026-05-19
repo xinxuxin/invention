@@ -15,6 +15,7 @@ export type AnalysisSession = {
   id: string;
   name: string | null;
   active_branch_id: string | null;
+  active_dataset_id: string | null;
   created_at: string;
   updated_at: string;
   branches: Branch[];
@@ -55,6 +56,7 @@ export type ObjectProfile = {
 export type Dataset = {
   id: string;
   session_id: string;
+  dataset_key: string;
   original_filename: string;
   object_type: string;
   module?: string | null;

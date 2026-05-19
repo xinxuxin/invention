@@ -41,6 +41,12 @@ export async function listDatasets(sessionId: string): Promise<DatasetListRespon
   return request<DatasetListResponse>(`/api/sessions/${sessionId}/datasets`);
 }
 
+export async function activateDataset(sessionId: string, datasetId: string): Promise<AnalysisSession> {
+  return request<AnalysisSession>(`/api/sessions/${sessionId}/datasets/${datasetId}/activate`, {
+    method: "POST",
+  });
+}
+
 export async function listBranches(sessionId: string): Promise<BranchListResponse> {
   return request<BranchListResponse>(`/api/sessions/${sessionId}/branches`);
 }

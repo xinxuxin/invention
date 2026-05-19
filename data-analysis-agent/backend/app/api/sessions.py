@@ -8,7 +8,15 @@ from app.models.entities import AnalysisSession, Branch, Dataset, VersionNode, n
 from app.schemas.dataset import DatasetListResponse, DatasetRead, DatasetUploadResponse
 from app.schemas.session import SessionCreate, SessionRead
 from app.services.introspection import introspect_object
-from app.services.versioning import active_branch, branch_read, current_version, dataset_read, sync_branch_pointer
+from app.services.versioning import (
+    active_branch,
+    branch_read,
+    current_version,
+    dataset_key,
+    dataset_read,
+    sync_branch_pointer,
+    unique_dataset_key,
+)
 from app.storage.files import load_pickle, save_snapshot, save_upload
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -37,6 +45,7 @@ def get_analysis_session(session_id: str, db: Session = Depends(get_session)) ->
 
     if analysis_session.active_branch_id is None:
         active_branch(analysis_session, db)
+    _ensure_active_dataset(analysis_session, db)
     branches = db.exec(select(Branch).where(Branch.session_id == session_id)).all()
     return _session_read(analysis_session, list(branches))
 
@@ -55,6 +64,8 @@ async def upload_datasets(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="At least one file is required")
 
     main_branch = _get_main_branch(session_id, db)
+    existing_datasets = list(db.exec(select(Dataset).where(Dataset.session_id == session_id)).all())
+    used_keys = {dataset_key(dataset) for dataset in existing_datasets}
     uploaded: list[DatasetRead] = []
 
     for upload in files:
@@ -77,6 +88,7 @@ async def upload_datasets(
         dataset = Dataset(
             id=dataset_id,
             session_id=session_id,
+            dataset_key=unique_dataset_key(upload.filename or "uploaded.pkl", used_keys),
             original_filename=upload.filename or "uploaded.pkl",
             object_type=profile.get("object_type", type(value).__qualname__),
             module=profile.get("module"),
@@ -100,6 +112,8 @@ async def upload_datasets(
         db.add(dataset)
         db.add(version)
         db.add(main_branch)
+        if analysis_session.active_dataset_id is None:
+            analysis_session.active_dataset_id = dataset_id
         analysis_session.updated_at = utc_now()
         db.add(analysis_session)
         db.commit()
@@ -128,6 +142,26 @@ def get_dataset(session_id: str, dataset_id: str, db: Session = Depends(get_sess
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
 
     return dataset_read(dataset, _current_version(dataset, db))
+
+
+@router.post("/{session_id}/datasets/{dataset_id}/activate", response_model=SessionRead)
+def activate_dataset(session_id: str, dataset_id: str, db: Session = Depends(get_session)) -> SessionRead:
+    analysis_session = db.get(AnalysisSession, session_id)
+    if analysis_session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    dataset = db.get(Dataset, dataset_id)
+    if dataset is None or dataset.session_id != session_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
+
+    analysis_session.active_dataset_id = dataset_id
+    analysis_session.updated_at = utc_now()
+    db.add(analysis_session)
+    db.commit()
+    db.refresh(analysis_session)
+
+    branches = db.exec(select(Branch).where(Branch.session_id == session_id)).all()
+    return _session_read(analysis_session, list(branches))
 
 
 def _validate_pickle_upload(upload: UploadFile) -> None:
@@ -159,11 +193,28 @@ def _current_version(dataset: Dataset, db: Session) -> VersionNode:
         ) from exc
 
 
+def _ensure_active_dataset(analysis_session: AnalysisSession, db: Session) -> None:
+    if analysis_session.active_dataset_id:
+        dataset = db.get(Dataset, analysis_session.active_dataset_id)
+        if dataset is not None and dataset.session_id == analysis_session.id:
+            return
+
+    dataset = db.exec(select(Dataset).where(Dataset.session_id == analysis_session.id)).first()
+    if dataset is None:
+        return
+
+    analysis_session.active_dataset_id = dataset.id
+    db.add(analysis_session)
+    db.commit()
+    db.refresh(analysis_session)
+
+
 def _session_read(analysis_session: AnalysisSession, branches: list[Branch]) -> SessionRead:
     return SessionRead(
         id=analysis_session.id,
         name=analysis_session.name,
         active_branch_id=analysis_session.active_branch_id,
+        active_dataset_id=analysis_session.active_dataset_id,
         created_at=analysis_session.created_at,
         updated_at=analysis_session.updated_at,
         branches=[branch_read(branch) for branch in branches],

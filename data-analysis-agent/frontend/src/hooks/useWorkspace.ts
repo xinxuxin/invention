@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
+  activateDataset as activateDatasetRequest,
   checkoutBranch,
   createBranch as createBranchRequest,
   createSession,
@@ -63,7 +64,7 @@ export function useWorkspace() {
         setSession(readySession);
         setDatasets(readyDatasets);
         setHistory(readyHistory);
-        setActiveDatasetId(readyDatasets[0]?.id ?? null);
+        setActiveDatasetId(readySession.active_dataset_id ?? readyDatasets[0]?.id ?? null);
         setSelectedVersionId(lastItem(readyHistory)?.id ?? null);
         setSessionStatus("ready");
       })
@@ -106,9 +107,10 @@ export function useWorkspace() {
     setDatasets(refreshed.datasets);
     setHistory(refreshed.history);
     setActiveDatasetId((current) =>
-      current && refreshed.datasets.some((dataset) => dataset.id === current)
-        ? current
-        : refreshed.datasets[0]?.id ?? null,
+      refreshed.session.active_dataset_id ??
+        (current && refreshed.datasets.some((dataset) => dataset.id === current)
+          ? current
+          : refreshed.datasets[0]?.id ?? null),
     );
     setSelectedVersionId((current) =>
       current && refreshed.history.some((version) => version.id === current)
@@ -147,7 +149,11 @@ export function useWorkspace() {
         });
 
         setDatasets((current) => [...response.datasets, ...current]);
-        setActiveDatasetId(response.datasets[0]?.id ?? activeDatasetId);
+        const nextActiveDatasetId = response.datasets[0]?.id ?? activeDatasetId;
+        setActiveDatasetId(nextActiveDatasetId);
+        if (nextActiveDatasetId) {
+          await activateDatasetRequest(session.id, nextActiveDatasetId);
+        }
         void refreshWorkspace();
         setUpload({
           status: "success",
@@ -170,6 +176,25 @@ export function useWorkspace() {
   const refreshDatasets = useCallback(async () => {
     await refreshWorkspace();
   }, [refreshWorkspace]);
+
+  const activateDataset = useCallback(
+    async (datasetId: string) => {
+      if (!session) {
+        setActiveDatasetId(datasetId);
+        return;
+      }
+
+      setActiveDatasetId(datasetId);
+      try {
+        const updatedSession = await activateDatasetRequest(session.id, datasetId);
+        setSession(updatedSession);
+      } catch (error: unknown) {
+        setSessionError(error instanceof Error ? error.message : "Unable to activate dataset");
+        await refreshWorkspace();
+      }
+    },
+    [refreshWorkspace, session],
+  );
 
   const createBranch = useCallback(
     async (name: string, fromVersionId?: string | null) => {
@@ -281,7 +306,7 @@ export function useWorkspace() {
     exportArtifacts,
     exportStatus,
     exportMessage,
-    setActiveDatasetId,
+    setActiveDatasetId: activateDataset,
     upload,
     uploadFiles,
     refreshDatasets,

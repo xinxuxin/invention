@@ -18,6 +18,7 @@ class VersionNodeRead(BaseModel):
 class DatasetRead(BaseModel):
     id: str
     session_id: str
+    dataset_key: str
     original_filename: str
     object_type: str
     module: str | None
