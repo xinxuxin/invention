@@ -123,6 +123,182 @@ def test_invalid_chart_artifact_retries() -> None:
     assert "Chart artifact is invalid" in result.reasons[0]
 
 
+def test_preview_request_rejects_top_countries_table() -> None:
+    table = ExecutionArtifact(
+        id="table-1",
+        name="Top countries",
+        kind="table",
+        type="table",
+        title="Top countries",
+        columns=[{"key": "country"}, {"key": "record_count"}],
+        rows=[{"country": "CN", "record_count": 19}, {"country": "CA", "record_count": 1}],
+        path="/tmp/table.json",
+        metadata={"columns": [{"key": "country"}, {"key": "record_count"}]},
+    )
+    result = ResultVerifier().verify(
+        user_message="Convert this dataset into a tabular preview. Show inferred columns and first 5 rows.",
+        execution_result=_execution(result_preview={"columns": ["country", "record_count"]}),
+        artifacts_created_this_turn=[table],
+    )
+
+    assert result.severity == "retry"
+    assert "country-count" in " ".join(result.reasons)
+
+
+def test_filing_date_request_rejects_top_countries_table() -> None:
+    table = ExecutionArtifact(
+        id="table-1",
+        name="Top countries",
+        kind="table",
+        type="table",
+        title="Top countries",
+        columns=[{"key": "country"}, {"key": "record_count"}],
+        rows=[{"country": "CN", "record_count": 19}],
+        path="/tmp/table.json",
+        metadata={"columns": [{"key": "country"}, {"key": "record_count"}]},
+    )
+    result = ResultVerifier().verify(
+        user_message="What is the filing date range? Also summarize filings by year in a table.",
+        execution_result=_execution(result_preview={"summary": "ok"}),
+        artifacts_created_this_turn=[table],
+    )
+
+    assert result.severity == "retry"
+    assert "filings by year" in " ".join(result.reasons).lower()
+
+
+def test_filing_date_request_accepts_year_count_table() -> None:
+    table = ExecutionArtifact(
+        id="table-1",
+        name="Patent filings by year",
+        kind="table",
+        type="table",
+        title="Patent filings by year",
+        columns=[{"key": "filing_year"}, {"key": "count"}],
+        rows=[{"filing_year": 2020, "count": 4}],
+        path="/tmp/table.json",
+        metadata={
+            "columns": [{"key": "filing_year"}, {"key": "count"}],
+            "row_count": 1,
+            "source_total_row_count": 10,
+            "analyzed_row_count": 10,
+        },
+    )
+    result = ResultVerifier().verify(
+        user_message="What is the filing date range? Also summarize filings by year in a table.",
+        execution_result=_execution(
+            result_preview={
+                "filing_date_min": "2020-01-01",
+                "filing_date_max": "2020-12-31",
+                "source_total_row_count": 10,
+                "analyzed_row_count": 10,
+            }
+        ),
+        artifacts_created_this_turn=[table],
+        all_artifacts_for_message=[
+            _artifact(
+                "table",
+                columns=[{"key": "country"}, {"key": "record_count"}],
+                metadata={"row_count": 1},
+            )
+        ],
+    )
+
+    assert result.severity == "pass"
+
+
+def test_filing_date_sample_table_retries() -> None:
+    table = ExecutionArtifact(
+        id="table-1",
+        name="Filings by year sample",
+        kind="table",
+        type="table",
+        title="Filings by year sample",
+        columns=[{"key": "filing_year"}, {"key": "filing_count"}],
+        rows=[{"filing_year": 2020, "filing_count": 4}],
+        path="/tmp/table.json",
+        metadata={
+            "columns": [{"key": "filing_year"}, {"key": "filing_count"}],
+            "row_count": 1,
+            "source_total_row_count": 24410,
+            "analyzed_row_count": 1000,
+        },
+    )
+    result = ResultVerifier().verify(
+        user_message="What is the filing date range? Also summarize filings by year in a table.",
+        execution_result=_execution(
+            result_preview={
+                "filing_date_min": "2020-01-01",
+                "filing_date_max": "2020-12-31",
+                "source_total_row_count": 24410,
+                "analyzed_row_count": 1000,
+            }
+        ),
+        artifacts_created_this_turn=[table],
+    )
+
+    assert result.severity == "retry"
+    assert "sampled" in " ".join(result.reasons).lower() or "full dataset" in result.retry_instruction
+
+
+def test_line_chart_request_rejects_bar_chart() -> None:
+    chart = ExecutionArtifact(
+        id="chart-1",
+        name="Patent filings by year",
+        kind="chart",
+        type="chart",
+        title="Patent filings by year",
+        chart_spec={
+            "chart_type": "bar",
+            "data": [{"filing_year": 2020, "filing_count": 5}],
+            "x": "filing_year",
+            "y": "filing_count",
+        },
+        path="/tmp/chart.json",
+        metadata={
+            "chart_spec": {
+                "chart_type": "bar",
+                "data": [{"filing_year": 2020, "filing_count": 5}],
+                "x": "filing_year",
+                "y": "filing_count",
+            }
+        },
+    )
+    result = ResultVerifier().verify(
+        user_message="Create a line chart showing filings by year based on filing_date.",
+        execution_result=_execution(result_preview={"ok": True}),
+        artifacts_created_this_turn=[chart],
+    )
+
+    assert result.severity == "retry"
+    assert "line chart" in " ".join(result.reasons).lower()
+
+
+def test_country_count_table_matches_country_request() -> None:
+    table = ExecutionArtifact(
+        id="table-1",
+        name="Top countries",
+        kind="table",
+        type="table",
+        title="Top countries",
+        columns=[{"key": "country"}, {"key": "record_count"}],
+        rows=[{"country": "CN", "record_count": 19}, {"country": "CA", "record_count": 1}],
+        path="/tmp/table.json",
+        metadata={
+            "columns": [{"key": "country"}, {"key": "record_count"}],
+            "source_row_count": 20,
+            "analyzed_row_count": 20,
+        },
+    )
+    result = ResultVerifier().verify(
+        user_message="Show top countries by number of patent records",
+        execution_result=_execution(result_preview={"source_row_count": 20, "analyzed_row_count": 20}),
+        artifacts_created_this_turn=[table],
+    )
+
+    assert result.severity == "pass"
+
+
 def test_final_answer_raw_attrs_retries() -> None:
     result = ResultVerifier().verify(
         user_message="What is in this file?",
@@ -131,6 +307,23 @@ def test_final_answer_raw_attrs_retries() -> None:
 
     assert result.severity == "retry"
     assert "wrapper" in result.retry_instruction.lower()
+
+
+def test_result_nameerror_retry_mentions_isolated_execution() -> None:
+    result = ResultVerifier().verify(
+        user_message="create a pie chart for country",
+        execution_result=ExecutionResult(
+            ok=False,
+            stdout="",
+            stderr="",
+            traceback="NameError: name 'RESULT' is not defined",
+            result_preview=None,
+        ),
+        retries_remaining=True,
+    )
+
+    assert result.severity == "retry"
+    assert "RESULT is not preserved" in result.retry_instruction
 
 
 def test_useful_inspection_preview_finalizes() -> None:

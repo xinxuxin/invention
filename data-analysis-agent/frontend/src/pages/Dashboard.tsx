@@ -54,6 +54,15 @@ export function Dashboard() {
     onStateChanged: workspace.refreshWorkspace,
   });
   const isOnline = health.status === "online";
+  const fakeAgentMode = health.status === "online" && Boolean(health.config?.fake_agent_mode);
+  const agentModeLabel =
+    health.status === "online"
+      ? fakeAgentMode
+        ? "fake agent"
+        : "real agent"
+      : health.status === "loading"
+        ? "checking"
+        : "offline";
   const branch = workspace.activeBranch;
   const artifacts = [...workspace.exportArtifacts, ...chat.artifacts];
   const toasts = [
@@ -98,9 +107,16 @@ export function Dashboard() {
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <StatusPill
-              label={`API ${health.status === "loading" ? "checking" : isOnline ? "online" : "offline"}`}
+              label={`API ${health.status === "loading" ? "checking" : isOnline ? `online · ${agentModeLabel}` : "offline"}`}
               status={isOnline ? "ok" : health.status === "loading" ? "loading" : "warn"}
             />
+            {fakeAgentMode ? (
+              <StatusPill
+                label="Fake agent mode"
+                status="warn"
+                icon={<AlertCircle className="h-3.5 w-3.5 text-amber-700" />}
+              />
+            ) : null}
             <StatusPill
               label={
                 workspace.sessionStatus === "ready"

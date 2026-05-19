@@ -157,6 +157,8 @@ def _key_findings(
             findings.append(f"CSV `{artifact.title or artifact.name}` is ready to download{f' with {row_count} rows' if row_count is not None else ''}.")
 
     preview = execution_result.result_preview if execution_result else None
+    if preview is not None:
+        findings.extend(_date_range_findings(preview))
     if preview is not None and len(findings) < 3:
         findings.extend(_findings_from_preview(preview))
     return _dedupe(findings)[:5]
@@ -164,6 +166,9 @@ def _key_findings(
 
 def _findings_from_preview(preview: Any) -> list[str]:
     if isinstance(preview, Mapping):
+        date_findings = _date_range_findings(preview)
+        if date_findings:
+            return date_findings
         if preview.get("type") == "dataframe":
             shape = preview.get("shape")
             columns = preview.get("columns")
@@ -193,8 +198,27 @@ def _findings_from_preview(preview: Any) -> list[str]:
     return []
 
 
+def _date_range_findings(preview: Any) -> list[str]:
+    if not isinstance(preview, Mapping):
+        return []
+    pairs = (
+        ("filing_date_min", "filing_date_max", "Filing date range"),
+        ("min_filing_date", "max_filing_date", "Filing date range"),
+        ("date_min", "date_max", "Date range"),
+    )
+    for start_key, end_key, label in pairs:
+        start = preview.get(start_key)
+        end = preview.get(end_key)
+        if start is not None and end is not None:
+            return [f"{label}: {_format_scalar(start)} to {_format_scalar(end)}."]
+    return []
+
+
 def _summary_from_preview(preview: Any) -> str:
     if isinstance(preview, Mapping):
+        semantic = _semantic_summary_from_preview(preview)
+        if semantic:
+            return semantic
         if preview.get("type") == "dataframe":
             shape = preview.get("shape")
             if isinstance(shape, list) and len(shape) >= 2:
@@ -291,6 +315,7 @@ def _structural_findings(preview: Mapping[str, Any]) -> list[str]:
     fields = _representative_fields(preview)
     if fields:
         findings.append(f"Representative fields include {', '.join(fields[:10])}.")
+        findings.extend(_semantic_field_group_findings(fields))
 
     return findings
 
@@ -317,6 +342,73 @@ def _representative_fields(preview: Mapping[str, Any]) -> list[str]:
     if isinstance(keys, list):
         return [str(key) for key in keys]
     return []
+
+
+def _semantic_summary_from_preview(preview: Mapping[str, Any]) -> str:
+    fields = _representative_fields(preview)
+    if not _looks_like_patent_metadata(fields):
+        return ""
+    length = (
+        preview.get("length")
+        or preview.get("object_length")
+        or preview.get("records")
+        or preview.get("row_count")
+        or preview.get("source_total_row_count")
+        or preview.get("source_row_count")
+    )
+    count_phrase = ""
+    if isinstance(length, (int, float)) and not isinstance(length, bool):
+        count_phrase = f" with **{int(length):,} records**"
+    return (
+        f"This appears to be a patent portfolio metadata dataset{count_phrase}. "
+        "Each record represents a patent or patent-application metadata entry, including jurisdiction, "
+        "document identifiers, title, parties, filing/publication dates, legal status, citation or family "
+        "metrics, and classification fields when present."
+    )
+
+
+def _looks_like_patent_metadata(fields: list[str]) -> bool:
+    normalized = {field.lower() for field in fields}
+    evidence = {
+        "country",
+        "doc_number",
+        "kind",
+        "title",
+        "owners",
+        "assignees",
+        "inventors",
+        "filing_date",
+        "publication_date",
+        "status",
+        "family_size",
+        "forward_citation_count",
+    }
+    return len(normalized & evidence) >= 4 and ("title" in normalized or "doc_number" in normalized)
+
+
+def _semantic_field_group_findings(fields: list[str]) -> list[str]:
+    normalized = {field.lower(): field for field in fields}
+    if not _looks_like_patent_metadata(fields):
+        return []
+    groups = [
+        ("Identifier fields", ("country", "doc_number", "kind", "title")),
+        ("Party fields", ("owners", "inventors", "assignees")),
+        (
+            "Date fields",
+            ("filing_date", "application_date", "publication_date", "priority_date", "expiration_date"),
+        ),
+        (
+            "Status and metrics fields",
+            ("status", "is_application", "is_grant", "family_size", "forward_citation_count", "claims"),
+        ),
+        ("Classification fields", ("cpc_codes", "all_cpc_codes", "ipc_codes", "classification_codes")),
+    ]
+    findings: list[str] = []
+    for label, candidates in groups:
+        present = [normalized[candidate] for candidate in candidates if candidate in normalized]
+        if present:
+            findings.append(f"{label}: {', '.join(present[:8])}.")
+    return findings
 
 
 def _display_object_type(value: Any) -> str:

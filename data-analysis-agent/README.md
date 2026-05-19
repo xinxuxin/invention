@@ -150,7 +150,7 @@ BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-Use `AGENT_MODEL_MODE=fake` for deterministic local/testing behavior without OpenAI API calls.
+Use `AGENT_MODEL_MODE=fake`, `AGENT_MODE=fake`, or `FAKE_AGENT_MODE=true` only for deterministic tests/evals without OpenAI API calls. Normal demo/UI runs should use `AGENT_MODEL_MODE=openai`; the frontend health badge warns when fake mode is active so reviewers do not mistake scripted behavior for the real coding agent.
 
 ## Run Locally
 

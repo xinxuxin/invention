@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Annotated, Any
 
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
 
@@ -12,9 +14,11 @@ from app.agent.tools import AGENT_TOOLS, execution_result_for_model
 from app.api.chat import get_model_client
 from app.db.session import get_session
 from app.models.entities import AnalysisSession, Branch, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
-from app.runtime.python_executor import ExecutionResult, PythonExecutor
+from app.runtime.python_executor import ExecutionResult, PythonExecutor, object_to_record
 from app.schemas.confirmation import ConfirmationActionResponse, ConfirmationRead
-from app.services.versioning import apply_version_to_dataset, sync_branch_pointer
+from app.services.introspection import introspect_object
+from app.services.versioning import apply_version_to_dataset, latest_versions_for_branch, sync_branch_pointer
+from app.storage.files import load_pickle, save_snapshot
 
 router = APIRouter(prefix="/api/sessions", tags=["confirmations"])
 
@@ -32,6 +36,8 @@ def approve_confirmation(
     confirmation = _pending_confirmation_or_404(session_id, confirmation_id, db)
     if confirmation.tool_arguments.get("operation_kind") == "rollback":
         return _approve_rollback_confirmation(confirmation, db)
+    if confirmation.tool_arguments.get("operation_kind") in {"delete_last_n", "delete_empty_title"}:
+        return _approve_direct_mutation_confirmation(confirmation, db)
 
     events: list[dict[str, Any]] = [
         {"type": "trace", "message": "Confirmation approved; applying the proposed mutation..."},
@@ -196,6 +202,232 @@ def _approve_rollback_confirmation(
             ]
         },
     )
+
+
+def _approve_direct_mutation_confirmation(
+    confirmation: PendingConfirmation,
+    db: Session,
+) -> ConfirmationActionResponse:
+    dataset = db.get(Dataset, confirmation.active_dataset_id or "")
+    session = db.get(AnalysisSession, confirmation.session_id)
+    branch = db.exec(
+        select(Branch)
+        .where(Branch.session_id == confirmation.session_id)
+        .where(Branch.name == confirmation.branch_name)
+    ).first()
+    if dataset is None or session is None or branch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Confirmation target not found")
+
+    try:
+        current_value = load_pickle(Path(dataset.current_snapshot_path))
+        operation_kind = str(confirmation.tool_arguments.get("operation_kind"))
+        if operation_kind == "delete_last_n":
+            new_value, preview = _delete_last_n_value(current_value, int(confirmation.tool_arguments.get("delete_count") or 0))
+        elif operation_kind == "delete_empty_title":
+            new_value, preview = _delete_empty_title_value(current_value)
+        else:
+            raise ValueError(f"Unsupported direct mutation: {operation_kind}")
+
+        updated_dataset = _persist_direct_mutation(
+            db,
+            session=session,
+            branch=branch,
+            dataset=dataset,
+            value=new_value,
+            mutation_summary=confirmation.operation_summary,
+            created_by_message_id=confirmation.id,
+        )
+        confirmation.status = "approved"
+        confirmation.resolved_at = utc_now()
+        db.add(confirmation)
+        db.commit()
+        db.refresh(confirmation)
+
+        result_payload = {
+            "ok": True,
+            "stdout": "",
+            "stderr": "",
+            "traceback": None,
+            "result_preview": preview,
+            "updated_datasets": [updated_dataset],
+        }
+        events = [
+            {"type": "trace", "message": "Confirmation approved; applying the optimized dataset mutation..."},
+            {
+                "type": "code_result_summary",
+                **result_payload,
+            },
+            {
+                "type": "final_answer",
+                "answer": _direct_mutation_answer(confirmation.operation_summary, preview),
+                "state_changed": True,
+            },
+            {"type": "message_done"},
+        ]
+        return ConfirmationActionResponse(
+            confirmation=_confirmation_read(confirmation),
+            events=events,
+            result=result_payload,
+        )
+    except Exception as exc:
+        confirmation.status = "failed"
+        confirmation.resolved_at = utc_now()
+        db.add(confirmation)
+        db.commit()
+        db.refresh(confirmation)
+        events = [
+            {
+                "type": "final_answer",
+                "answer": (
+                    f"I tried to apply '{confirmation.operation_summary}', but the optimized mutation failed: "
+                    f"{exc}. No new dataset version was saved."
+                ),
+                "state_changed": False,
+            },
+            {"type": "message_done"},
+        ]
+        return ConfirmationActionResponse(
+            confirmation=_confirmation_read(confirmation),
+            events=events,
+            result={"ok": False, "stderr": str(exc), "updated_datasets": []},
+        )
+
+
+def _delete_last_n_value(value: Any, delete_count: int) -> tuple[Any, dict[str, Any]]:
+    current_count = _safe_len(value)
+    count = max(0, min(delete_count, current_count))
+    if isinstance(value, pd.DataFrame):
+        new_value = value.iloc[:-count].copy() if count else value.copy()
+    elif isinstance(value, list):
+        new_value = value[:-count] if count else list(value)
+    elif isinstance(value, tuple):
+        new_value = value[:-count] if count else tuple(value)
+    else:
+        frame = pd.DataFrame([object_to_record(item) for item in value]) if _is_iterable_records(value) else None
+        if frame is None:
+            raise ValueError("This object type does not support deleting the last records safely")
+        new_value = frame.iloc[:-count].copy() if count else frame.copy()
+    return new_value, {
+        "full_scan": True,
+        "deleted_count": count,
+        "affected_count": count,
+        "current_row_count": current_count,
+        "new_row_count": _safe_len(new_value),
+    }
+
+
+def _delete_empty_title_value(value: Any) -> tuple[Any, dict[str, Any]]:
+    if isinstance(value, pd.DataFrame):
+        current_count = int(len(value))
+        if "title" not in value.columns:
+            raise ValueError("No title field exists on this dataset")
+        mask = ~(value["title"].isna() | value["title"].astype(str).str.strip().eq(""))
+        affected_count = current_count - int(mask.sum())
+        new_value = value.loc[mask].copy()
+    elif isinstance(value, list):
+        current_count = len(value)
+        keep_mask = [not _empty_title_from_item(item) for item in value]
+        affected_count = current_count - sum(keep_mask)
+        new_value = [item for item, keep in zip(value, keep_mask, strict=False) if keep]
+    elif isinstance(value, tuple):
+        current_count = len(value)
+        keep_mask = [not _empty_title_from_item(item) for item in value]
+        affected_count = current_count - sum(keep_mask)
+        new_value = tuple(item for item, keep in zip(value, keep_mask, strict=False) if keep)
+    else:
+        raise ValueError("This object type does not support title-based deletion safely")
+
+    return new_value, {
+        "full_scan": True,
+        "affected_count": int(affected_count),
+        "current_row_count": int(current_count),
+        "new_row_count": _safe_len(new_value),
+    }
+
+
+def _empty_title_from_item(item: Any) -> bool:
+    record = object_to_record(item)
+    value = record.get("title")
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _safe_len(value: Any) -> int:
+    try:
+        return int(len(value))  # type: ignore[arg-type]
+    except Exception:
+        return 1
+
+
+def _is_iterable_records(value: Any) -> bool:
+    if isinstance(value, (str, bytes, bytearray, dict)):
+        return False
+    try:
+        iter(value)
+    except TypeError:
+        return False
+    return True
+
+
+def _persist_direct_mutation(
+    db: Session,
+    *,
+    session: AnalysisSession,
+    branch: Branch,
+    dataset: Dataset,
+    value: Any,
+    mutation_summary: str,
+    created_by_message_id: str,
+) -> dict[str, Any]:
+    version_id = new_id()
+    snapshot_path = save_snapshot(session.id, dataset.id, version_id, value)
+    profile = introspect_object(value)
+    profile["_mutation"] = {"summary": mutation_summary}
+    branch_versions = latest_versions_for_branch(branch.id, db)
+    version = VersionNode(
+        id=version_id,
+        dataset_id=dataset.id,
+        branch_id=branch.id,
+        parent_version_id=(branch_versions.get(dataset.id).id if branch_versions.get(dataset.id) else dataset.current_version_id),
+        label="confirmed mutation",
+        snapshot_path=str(snapshot_path),
+        mutation_summary=mutation_summary,
+        created_by_message_id=created_by_message_id,
+        profile=profile,
+    )
+    sync_branch_pointer(branch, version)
+    dataset.current_version_id = version_id
+    dataset.current_snapshot_path = str(snapshot_path)
+    dataset.profile = profile
+    dataset.object_type = profile.get("object_type", type(value).__qualname__)
+    dataset.module = profile.get("module")
+    dataset.updated_at = utc_now()
+    session.updated_at = utc_now()
+    db.add(version)
+    db.add(branch)
+    db.add(dataset)
+    db.add(session)
+    db.commit()
+    db.refresh(dataset)
+    return {
+        "dataset_id": dataset.id,
+        "key": dataset.dataset_key,
+        "version_id": version_id,
+        "profile": profile,
+        "mutation_summary": mutation_summary,
+    }
+
+
+def _direct_mutation_answer(summary: str, preview: dict[str, Any]) -> str:
+    current_count = preview.get("current_row_count")
+    new_count = preview.get("new_row_count")
+    affected_count = preview.get("affected_count") or preview.get("deleted_count")
+    if isinstance(current_count, int) and isinstance(new_count, int):
+        return (
+            f"Applied: {summary}. Affected records: {affected_count}. "
+            f"Row count changed from {current_count:,} to {new_count:,}.\n\n"
+            "**State changed:** Yes"
+        )
+    return f"Applied: {summary}. Saved a new dataset version.\n\n**State changed:** Yes"
 
 
 def _code_result_event(result: ExecutionResult) -> dict[str, Any]:

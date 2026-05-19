@@ -9,6 +9,7 @@ import type {
   DatasetUploadResponse,
   ExecutionArtifact,
   ExportResponse,
+  HealthConfigResponse,
   HealthResponse,
   HistoryResponse,
   SessionListResponse,
@@ -25,6 +26,16 @@ export async function getHealth(): Promise<HealthResponse> {
   }
 
   return response.json() as Promise<HealthResponse>;
+}
+
+export async function getHealthConfig(): Promise<HealthConfigResponse> {
+  const response = await fetch(`${API_BASE_URL}/health/config`);
+
+  if (!response.ok) {
+    throw new Error(`Config check failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<HealthConfigResponse>;
 }
 
 export async function createSession(name?: string): Promise<AnalysisSession> {
@@ -166,10 +177,12 @@ export async function streamChat(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let streamOpen = true;
 
-  while (true) {
+  while (streamOpen) {
     const { value, done } = await reader.read();
     if (done) {
+      streamOpen = false;
       break;
     }
 

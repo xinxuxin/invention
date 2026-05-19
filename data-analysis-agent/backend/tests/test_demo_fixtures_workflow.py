@@ -152,12 +152,17 @@ def test_fake_agent_chart_artifact_creation(client: TestClient) -> None:
     dataset = _upload_fixture(client, session_id, "dataframe_transactions.pkl")
 
     events = _chat(client, session_id, dataset["id"], "Visualize this dataset")
-    artifact = next(event["artifact"] for event in events if event["type"] == "artifact_created")
+    artifact = next(
+        event["artifact"]
+        for event in events
+        if event["type"] == "artifact_created" and event["artifact"]["kind"] == "chart"
+    )
     content = client.get(f"/api/sessions/{session_id}/artifacts/{artifact['id']}/content").json()
 
     assert artifact["kind"] == "chart"
     assert artifact["metadata"]["chart_type"] == "bar"
-    assert content["title"] == "Fake agent chart"
+    assert content["title"] != "Fake agent chart"
+    assert content["title"] == "Dataset chart"
     assert content["chart_spec"]["data"]
 
 

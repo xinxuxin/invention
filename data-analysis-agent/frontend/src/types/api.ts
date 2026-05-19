@@ -3,6 +3,18 @@ export type HealthResponse = {
   service: string;
 };
 
+export type HealthConfigResponse = {
+  agent_mode: "real" | "fake" | string;
+  agent_model_mode: string;
+  fake_agent_mode: boolean;
+  llm_verifier_enabled: boolean;
+  verifier_mode: string;
+  llm_verifier_model: string;
+  llm_verifier_timeout_seconds: number;
+  verifier_skip_llm_after_step: number;
+  has_openai_api_key: boolean;
+};
+
 export type Branch = {
   id: string;
   name: string;
@@ -161,6 +173,7 @@ export type ChatStreamEvent =
       stdout?: string;
       stderr?: string;
       traceback?: string | null;
+      result_summary?: Record<string, unknown>;
       result_preview?: unknown;
       updated_datasets?: UpdatedDataset[];
     }

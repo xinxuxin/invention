@@ -248,3 +248,40 @@
 - Verified frontend build passes: `npm run build`.
 - Attempted frontend lint: `npm run lint` still fails because the frontend project has no ESLint configuration file.
 - Verified fake SoftBank quick eval passes: `python backend/scripts/evaluate_agent_demo.py --quick --dataset /Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl --base-url http://127.0.0.1:8001`.
+- Started follow-up SoftBank chat regression pass using `data-analysis-chat-2026-05-19T05-04-09-873Z.md` as the failure source.
+- Added explicit real/fake agent mode resolution so fake planner behavior only activates under `FAKE_AGENT_MODE=true`, `AGENT_MODE=fake`, or `AGENT_MODEL_MODE=fake`; backend startup and `/health/config` now expose mode metadata without secrets.
+- Added frontend health badge copy for `real agent` / `fake agent` and a visible fake-mode warning badge for demo clarity.
+- Updated fake/demo planner templates so chart titles are descriptive, filings-by-year requests use `filing_year`/`filing_count`, and line-or-bar time-series requests prefer line charts.
+- Strengthened deterministic verifier intent checks so tabular preview requests reject top-country aggregate tables, filing-date range requests require year-count output plus date range evidence, line-chart requests reject bar charts, and fake placeholder chart titles fail.
+- Added optimized controller-level confirmation/approval paths for `delete last N entries` and `delete empty/missing title`, avoiding slow generic DataFrame mutation code while preserving original objects where possible.
+- Wrapped the chat stream generator with structured SSE error handling so server exceptions emit `error`/`message_done` events instead of leaving the frontend with an unstructured abort.
+- Made `save_table()` and `save_chart()` helper signatures more forgiving for keyword `data=` and common agent call patterns, while still raising clear `ValueError` messages on invalid signatures.
+- Added regression tests for intent/artifact mismatches, line-chart enforcement, direct missing-title confirmation, and non-fake chart titles.
+- Added an ESLint configuration and TypeScript ESLint dependencies so `npm run lint` is now a real passing command.
+- Expanded the SoftBank eval harness/YAML with tabular-preview-not-top-countries, filing-date-not-top-countries, line-chart-filings-by-year, and chart-title-not-fake checks.
+- Updated response composition to surface structured filing-date min/max ranges in final answers when the Python result includes them.
+- Verified backend lint passes: `ruff check .`.
+- Verified backend tests pass: `116 passed`.
+- Verified frontend lint passes: `npm run lint`.
+- Verified frontend build passes: `npm run build`.
+- Verified deterministic SoftBank quick eval passes against local backend: `python backend/scripts/evaluate_agent_demo.py --quick --dataset /Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl --base-url http://127.0.0.1:8001`.
+- Started the main app in real agent mode with hybrid LLM verifier enabled; `/health/config` reports `agent_mode=real`, `fake_agent_mode=false`, and `has_openai_api_key=true`.
+- Browser-smoke-tested the frontend at `http://localhost:5173/`; the shell renders and shows `API online · real agent`.
+- Real-backend SSE smoke for `delete last 500 entries` returns structured `confirmation_required` and `message_done` events with no error/abort.
+- Started follow-up regression pass using `data-analysis-chat-2026-05-19T05-30-20-017Z.md` as the failure source.
+- Added per-step artifact verification semantics in the orchestrator: artifacts stay pending until verifier pass, retry artifacts are marked discarded, verified artifacts are deduped by semantic key, and fallback output avoids showing superseded duplicate tables.
+- Strengthened filing-date verifier logic so valid `filing_year` + `filing_count`/`count` tables pass, sampled filings-by-year artifacts retry, and old discarded artifacts do not poison later valid steps.
+- Added repeated retry protection and selective LLM verifier policy knobs so semantic/repeated-retry cases can escalate without spamming public "Skipping LLM verifier" trace messages.
+- Improved conceptual response composition for patent portfolio metadata so "What's in this file?" explains what records represent and groups identifiers, parties, dates, status/metrics, and classification fields when observed.
+- Added explicit RESULT isolation guidance and verifier retry classification for `NameError: name 'RESULT' is not defined`.
+- Fixed preview metadata clarity so `preview_dataframe()` carries full source row count, preview row count, analyzed row count, and `is_preview`.
+- Reduced trace noise by adding compact `result_summary` payloads and frontend summary chips for code results while keeping raw previews available for trace export.
+- Hardened artifact helpers further: malformed artifact payloads no longer abort SSE, `save_csv(data)` is accepted, and chart specs can use common `values`/`rows`/`records` aliases.
+- Expanded backend tests for artifact retry dedupe, filings-by-year verification, schema table verification, RESULT isolation, preview metadata, and flexible CSV helper behavior.
+- Updated the SoftBank eval YAML/script with duplicate-table, conceptual, pie-chart RESULT, and preview-metadata regression checks.
+- Verified backend lint passes: `ruff check app tests scripts`.
+- Verified backend tests pass: `121 passed`.
+- Verified frontend lint passes: `npm run lint`.
+- Verified frontend build passes: `npm run build`.
+- Verified deterministic SoftBank quick eval passes against local backend: `python backend/scripts/evaluate_agent_demo.py --quick --dataset /Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl --base-url http://localhost:8000`.
+- Ran real OpenAI-mode quick eval with the provided API key in process environment only; backend remained stable, but model output still showed non-deterministic misses on a few semantic/chart rubric checks, so the deterministic eval is the committed regression gate.

@@ -253,15 +253,16 @@ function TracePanel({ trace, isStreaming }: { trace: ChatTraceEvent[]; isStreami
   const [hasNewTraceWhileCollapsed, setHasNewTraceWhileCollapsed] = useState(false);
   const lastTraceIdRef = useRef<string | null>(null);
   const latest = trace[trace.length - 1];
+  const latestId = latest?.id;
 
   useEffect(() => {
-    if (!latest) {
+    if (!latestId) {
       return;
     }
 
     const previousId = lastTraceIdRef.current;
-    lastTraceIdRef.current = latest.id;
-    if (previousId === null || previousId === latest.id) {
+    lastTraceIdRef.current = latestId;
+    if (previousId === null || previousId === latestId) {
       return;
     }
 
@@ -270,7 +271,7 @@ function TracePanel({ trace, isStreaming }: { trace: ChatTraceEvent[]; isStreami
       setHasNewTraceWhileCollapsed(true);
       window.setTimeout(() => setHasNewTraceWhileCollapsed(false), 1800);
     }
-  }, [isStreaming, latest?.id, open]);
+  }, [isStreaming, latestId, open]);
 
   const handleToggle = () => {
     setOpen((value) => {
@@ -374,6 +375,7 @@ function TraceRow({ item }: { item: ChatTraceEvent }) {
 function CodeResultRow({ item }: { item: ChatTraceEvent }) {
   const [open, setOpen] = useState(true);
   const detail = item.ok ? item.stdout : item.stderr || item.traceback || item.stdout;
+  const summaryLines = codeResultSummaryLines(item);
 
   useEffect(() => {
     if (item.ok) {
@@ -427,6 +429,21 @@ function CodeResultRow({ item }: { item: ChatTraceEvent }) {
             className="overflow-hidden"
           >
             <div className="border-t border-white/80 px-3 py-2.5">
+              {summaryLines.length ? (
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                  {summaryLines.map((line) => (
+                    <span
+                      key={line}
+                      className={cn(
+                        "rounded-full px-2 py-1 text-[11px] font-bold",
+                        item.ok ? "bg-emerald-100 text-emerald-900" : "bg-rose-100 text-rose-900",
+                      )}
+                    >
+                      {line}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
               {detail ? (
                 <pre
                   className={cn(
@@ -776,9 +793,41 @@ function compactResultSummary(item: ChatTraceEvent) {
     return `${item.updatedDatasets.length} version${item.updatedDatasets.length === 1 ? "" : "s"} saved`;
   }
 
+  const summary = codeResultSummaryLines(item);
+  if (summary.length) {
+    return summary.join(" · ");
+  }
+
   const text = item.ok ? item.stdout : item.stderr || item.traceback;
   if (!text) {
     return item.ok ? "No output" : "See error";
   }
   return text.replace(/\s+/g, " ").slice(0, 96);
+}
+
+function codeResultSummaryLines(item: ChatTraceEvent) {
+  const summary = item.resultSummary;
+  if (!summary || typeof summary !== "object") {
+    return [];
+  }
+  const lines: string[] = [];
+  const resultType = summary.result_type ?? summary.ok;
+  if (resultType && typeof resultType === "string") {
+    lines.push(resultType);
+  }
+  const shape = summary.shape;
+  if (Array.isArray(shape) && shape.length >= 2) {
+    lines.push(`${String(shape[0])} rows`);
+    lines.push(`${String(shape[1])} columns`);
+  }
+  if (typeof summary.preview_rows === "number") {
+    lines.push(`${summary.preview_rows} preview rows`);
+  }
+  if (typeof summary.source_total_row_count === "number") {
+    lines.push(`${summary.source_total_row_count.toLocaleString()} source rows`);
+  }
+  if (typeof summary.artifact_count === "number" && summary.artifact_count > 0) {
+    lines.push(`${summary.artifact_count} artifact${summary.artifact_count === 1 ? "" : "s"}`);
+  }
+  return lines.slice(0, 5);
 }

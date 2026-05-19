@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.core.config import get_settings
+from app.core.config import get_settings, resolved_agent_mode
 from app.schemas.health import HealthResponse
 
 router = APIRouter(tags=["health"])
@@ -14,7 +14,11 @@ async def health() -> HealthResponse:
 @router.get("/health/config")
 async def health_config() -> dict[str, object]:
     settings = get_settings()
+    agent_mode = resolved_agent_mode(settings)
     return {
+        "agent_mode": agent_mode,
+        "agent_model_mode": settings.agent_model_mode,
+        "fake_agent_mode": agent_mode == "fake",
         "llm_verifier_enabled": settings.llm_verifier_enabled,
         "verifier_mode": settings.verifier_mode,
         "llm_verifier_model": settings.llm_verifier_model,

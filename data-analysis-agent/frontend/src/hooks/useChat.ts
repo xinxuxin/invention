@@ -17,6 +17,7 @@ export type ChatTraceEvent = {
   stdout?: string;
   stderr?: string;
   traceback?: string | null;
+  resultSummary?: Record<string, unknown>;
   resultPreview?: unknown;
   updatedDatasets?: UpdatedDataset[];
   severity?: string;
@@ -410,6 +411,7 @@ function toTraceEvent(event: ChatStreamEvent): ChatTraceEvent {
       stdout: event.stdout,
       stderr: event.stderr,
       traceback: event.traceback,
+      resultSummary: event.result_summary,
       resultPreview: event.result_preview,
       updatedDatasets: event.updated_datasets,
     };

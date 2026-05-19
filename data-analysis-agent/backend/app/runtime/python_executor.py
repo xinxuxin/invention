@@ -66,6 +66,8 @@ class ExecutionArtifact(BaseModel):
     path: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
+    status: str | None = None
+    semantic_key: str | None = None
 
 
 class UpdatedDataset(BaseModel):
@@ -445,13 +447,19 @@ class PythonExecutor:
     ) -> list[ExecutionArtifact]:
         persisted: list[ExecutionArtifact] = []
         for payload in artifact_payloads:
-            name = str(payload.get("name") or "artifact")
-            kind = str(payload.get("kind") or "artifact")
+            if not isinstance(payload, Mapping):
+                continue
+            raw_name = payload.get("name")
+            raw_kind = payload.get("kind")
+            name = str(raw_name) if isinstance(raw_name, (str, int, float, bool)) else "artifact"
+            kind = str(raw_kind) if isinstance(raw_kind, (str, int, float, bool)) else "artifact"
             content = payload.get("content", "")
             metadata = _json_safe(payload.get("metadata", {}))
             if isinstance(metadata, dict):
                 metadata.setdefault("type", kind)
                 metadata.setdefault("title", name)
+                metadata.setdefault("status", "pending_verification")
+                metadata.setdefault("semantic_key", _semantic_key(kind, name, metadata))
                 if source_message_id:
                     metadata.setdefault("source_message_id", source_message_id)
             artifact = persist_artifact(
@@ -582,7 +590,26 @@ def _execution_result_value(namespace: Mapping[str, Any], preview_value: Any, pr
 
 
 def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
-    def save_table(name: str, dataframe_or_records: Any, description: str | None = None) -> dict[str, str]:
+    def save_table(*args: Any, description: str | None = None, **kwargs: Any) -> dict[str, str]:
+        kw_name = kwargs.pop("name", None)
+        kw_data = kwargs.pop("data", kwargs.pop("dataframe_or_records", None))
+        if kwargs:
+            raise ValueError(f"save_table got unsupported keyword argument(s): {', '.join(sorted(kwargs))}")
+
+        if len(args) >= 2:
+            name = str(args[0])
+            dataframe_or_records = args[1]
+            if len(args) >= 3 and description is None:
+                description = str(args[2]) if args[2] is not None else None
+        elif len(args) == 1 and kw_data is not None:
+            name = str(args[0])
+            dataframe_or_records = kw_data
+        elif kw_name is not None and kw_data is not None:
+            name = str(kw_name)
+            dataframe_or_records = kw_data
+        else:
+            raise ValueError("save_table requires a table name and data")
+
         artifacts.append(_table_artifact_payload(name, dataframe_or_records, description=description))
         return {"kind": "table", "name": name}
 
@@ -591,12 +618,12 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
         kw_spec = kwargs.pop("chart_spec", None)
         kw_data = kwargs.pop("data", None)
         if kwargs:
-            raise TypeError(f"save_chart got unsupported keyword argument(s): {', '.join(sorted(kwargs))}")
+            raise ValueError(f"save_chart got unsupported keyword argument(s): {', '.join(sorted(kwargs))}")
 
         if len(args) == 1:
             chart_spec = args[0]
             if not isinstance(chart_spec, Mapping):
-                raise TypeError("save_chart(chart_spec) requires a mapping chart spec")
+                raise ValueError("save_chart(chart_spec) requires a mapping chart spec")
             name = str(chart_spec.get("title") or "Chart")
         elif len(args) >= 2:
             name = str(args[0])
@@ -607,13 +634,13 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
             chart_spec = kw_spec
             name = str(kw_name or (chart_spec.get("title") if isinstance(chart_spec, Mapping) else None) or "Chart")
         else:
-            raise TypeError("save_chart requires chart_spec or name and chart_spec")
+            raise ValueError("save_chart requires chart_spec or name and chart_spec")
 
         if kw_name is not None:
             name = str(kw_name)
         if kw_data is not None:
             if not isinstance(chart_spec, Mapping):
-                raise TypeError("save_chart data= requires chart_spec to be a mapping")
+                raise ValueError("save_chart data= requires chart_spec to be a mapping")
             chart_spec = {**dict(chart_spec), "data": kw_data}
 
         safe_spec = _validated_chart_spec(name, chart_spec, description=description)
@@ -642,7 +669,25 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
         )
         return {"kind": "chart", "name": name}
 
-    def save_csv(name: str, dataframe_or_records: Any) -> dict[str, str]:
+    def save_csv(*args: Any, **kwargs: Any) -> dict[str, str]:
+        kw_name = kwargs.pop("name", None)
+        kw_data = kwargs.pop("data", kwargs.pop("dataframe_or_records", None))
+        if kwargs:
+            raise ValueError(f"save_csv got unsupported keyword argument(s): {', '.join(sorted(kwargs))}")
+        if len(args) >= 2:
+            name = str(args[0])
+            dataframe_or_records = args[1]
+        elif len(args) == 1 and kw_data is not None:
+            name = str(args[0])
+            dataframe_or_records = kw_data
+        elif len(args) == 1:
+            name = str(kw_name or "CSV export")
+            dataframe_or_records = args[0]
+        elif kw_data is not None:
+            name = str(kw_name or "CSV export")
+            dataframe_or_records = kw_data
+        else:
+            raise ValueError("save_csv requires data to export")
         frame = _frame_from_records(dataframe_or_records)
         artifacts.append(
             {
@@ -820,7 +865,17 @@ def to_dataframe(obj: Any, limit: int | None = None) -> pd.DataFrame:
 
 
 def preview_dataframe(obj: Any, limit: int = MAX_PREVIEW_ROWS) -> pd.DataFrame:
-    return to_dataframe(obj, limit=limit)
+    source_total = _source_row_count(obj)
+    frame = to_dataframe(obj, limit=limit)
+    preview_count = int(len(frame))
+    if source_total is None:
+        source_total = preview_count
+    frame.attrs["source_total_row_count"] = int(source_total)
+    frame.attrs["source_row_count"] = int(source_total)
+    frame.attrs["analyzed_row_count"] = preview_count
+    frame.attrs["preview_row_count"] = preview_count
+    frame.attrs["is_preview"] = True
+    return frame
 
 
 def _pydantic_dump(obj: Any) -> dict[str, Any] | None:
@@ -905,17 +960,20 @@ def _table_artifact_payload(
         "kind": "table",
         "name": name,
         "content": document,
-            "metadata": {
-                "type": "table",
-                "title": document["title"],
-                "description": document.get("description"),
-                "columns": document["columns"],
-                "row_count": document["row_count"],
-                "source_row_count": document["source_row_count"],
-                "analyzed_row_count": document["analyzed_row_count"],
-                "preview_row_count": document["preview_row_count"],
-                "is_sampled": document["is_sampled"],
-                "stored_row_count": document["stored_row_count"],
+        "metadata": {
+            "type": "table",
+            "title": document["title"],
+            "description": document.get("description"),
+            "columns": document["columns"],
+            "rows": document["preview_rows"],
+            "row_count": document["row_count"],
+            "source_row_count": document["source_row_count"],
+            "source_total_row_count": document["source_total_row_count"],
+            "analyzed_row_count": document["analyzed_row_count"],
+            "preview_row_count": document["preview_row_count"],
+            "is_preview": document["is_preview"],
+            "is_sampled": document["is_sampled"],
+            "stored_row_count": document["stored_row_count"],
             "stored_column_count": document["stored_column_count"],
             "csv_download_available": True,
         },
@@ -934,6 +992,9 @@ def _table_document(
     source_row_count = _source_row_count(data)
     analyzed_row_count = _dataframe_attr_int(frame, "analyzed_row_count") or source_row_count or int(len(frame))
     source_row_count = _dataframe_attr_int(frame, "source_row_count") or source_row_count or analyzed_row_count
+    source_total_row_count = _dataframe_attr_int(frame, "source_total_row_count") or source_row_count
+    preview_attr_count = _dataframe_attr_int(frame, "preview_row_count")
+    is_preview = bool(frame.attrs.get("is_preview"))
     frame = frame.copy()
     frame.columns = _unique_column_names(frame.columns)
 
@@ -961,8 +1022,10 @@ def _table_document(
         "preview_rows": preview_rows,
         "row_count": int(row_count),
         "source_row_count": int(source_row_count),
+        "source_total_row_count": int(source_total_row_count),
         "analyzed_row_count": int(analyzed_row_count),
-        "preview_row_count": len(preview_rows),
+        "preview_row_count": int(preview_attr_count or len(preview_rows)),
+        "is_preview": is_preview,
         "is_sampled": bool(analyzed_row_count < source_row_count),
         "stored_row_count": len(rows),
         "stored_column_count": len(columns),
@@ -992,6 +1055,37 @@ def _source_row_count(value: Any) -> int | None:
         return int(len(value))  # type: ignore[arg-type]
     except Exception:
         return None
+
+
+def _semantic_key(kind: str, name: str, metadata: Mapping[str, Any]) -> str:
+    lowered = f"{name} {metadata.get('title') or ''} {metadata.get('description') or ''}".lower()
+    if kind == "csv":
+        return "csv_export"
+    if kind == "table":
+        keys = {
+            str(column.get("key") or column.get("label") or "").lower()
+            for column in metadata.get("columns", [])
+            if isinstance(column, Mapping)
+        }
+        if {"filing_year", "year"} & keys and any(key in keys for key in {"filing_count", "count", "record_count"}):
+            return "filings_by_year_table"
+        if "country" in keys and any(key in keys for key in {"count", "record_count", "patent_count"}):
+            return "top_countries_table"
+        if "schema" in lowered:
+            return "schema_summary_table"
+        if "preview" in lowered or "first" in lowered:
+            return "tabular_preview_table"
+    if kind == "chart":
+        chart_spec = metadata.get("chart_spec")
+        spec = chart_spec if isinstance(chart_spec, Mapping) else {}
+        x = str(spec.get("x") or metadata.get("x") or "").lower()
+        y = str(spec.get("y") or metadata.get("y") or "").lower()
+        if x in {"filing_year", "year"} and y in {"filing_count", "count", "record_count"}:
+            return "filings_by_year_chart"
+        if x == "country":
+            return "country_distribution_chart"
+    normalized_title = "".join(character if character.isalnum() else "_" for character in name.lower())
+    return f"{kind}_{normalized_title.strip('_') or 'artifact'}"
 
 
 def _dataframe_attr_int(frame: pd.DataFrame, key: str) -> int | None:
@@ -1174,6 +1268,8 @@ def _execution_artifact_read(artifact: Any, session_id: str) -> ExecutionArtifac
         path=artifact.path,
         metadata=metadata,
         created_at=artifact.created_at.isoformat(),
+        status=str(metadata.get("status")) if metadata.get("status") else None,
+        semantic_key=str(metadata.get("semantic_key")) if metadata.get("semantic_key") else None,
     )
 
 
@@ -1237,7 +1333,19 @@ def _validated_chart_spec(name: str, chart_spec: Any, description: str | None = 
     if not isinstance(raw, Mapping):
         raise ValueError("Chart spec must be a mapping with chart_type, data, x, and y")
 
-    data_value = raw.get("data")
+    data_value = None
+    for data_key in ("data", "values", "rows", "records"):
+        if data_key in raw and raw.get(data_key) is not None:
+            data_value = raw.get(data_key)
+            break
+    if data_value is None:
+        for candidate_key in ("dataset", "source", "table"):
+            candidate = raw.get(candidate_key)
+            if isinstance(candidate, (pd.DataFrame, pd.Series, np.ndarray, Mapping, Sequence)) and not isinstance(
+                candidate, (str, bytes, bytearray)
+            ):
+                data_value = candidate
+                break
     if isinstance(data_value, pd.DataFrame):
         data = _records_from_table(data_value)
     elif isinstance(data_value, Mapping):
@@ -1407,12 +1515,18 @@ def _json_safe(
 
     if isinstance(value, pd.DataFrame):
         frame = value.head(MAX_PREVIEW_ROWS)
+        source_total_row_count = int(value.attrs.get("source_total_row_count") or value.attrs.get("source_row_count") or len(value))
+        analyzed_row_count = int(value.attrs.get("analyzed_row_count") or len(value))
+        preview_row_count = int(value.attrs.get("preview_row_count") or len(frame))
         return {
             "type": "dataframe",
             "shape": [int(value.shape[0]), int(value.shape[1])],
             "columns": [str(column) for column in value.columns.tolist()],
-            "source_row_count": int(value.attrs.get("source_row_count") or len(value)),
-            "analyzed_row_count": int(value.attrs.get("analyzed_row_count") or len(value)),
+            "source_row_count": source_total_row_count,
+            "source_total_row_count": source_total_row_count,
+            "analyzed_row_count": analyzed_row_count,
+            "preview_row_count": preview_row_count,
+            "is_preview": bool(value.attrs.get("is_preview")),
             "rows": _json_safe(
                 frame.to_dict(orient="records"),
                 depth=depth + 1,

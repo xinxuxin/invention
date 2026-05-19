@@ -28,9 +28,15 @@ QUICK_QUESTIONS = [
         ],
     },
     {
-        "id": "tabular_preview",
+        "id": "tabular_preview_not_top_countries",
         "prompt": "Convert this dataset into a tabular preview if possible. Show the inferred columns and the first 5 rows.",
-        "expects": ["table_artifact", "no_wrapper_columns", "state_changed_false"],
+        "expects": [
+            "table_artifact",
+            "no_wrapper_columns",
+            "preview_table_domain_columns",
+            "table_not_top_countries",
+            "state_changed_false",
+        ],
     },
     {
         "id": "schema",
@@ -49,9 +55,20 @@ QUICK_QUESTIONS = [
         ],
     },
     {
-        "id": "filings_by_year_full_data",
+        "id": "filing_date_range_no_duplicate_tables",
         "prompt": "What is the filing date range of this portfolio? Also summarize the number of filings by year in a table.",
-        "expects": ["table_artifact", "filing_years_full_data", "state_changed_false"],
+        "expects": [
+            "no_step_budget",
+            "max_execute_python_calls_2",
+            "table_artifact",
+            "exactly_one_filings_by_year_table",
+            "no_sample_filings_table",
+            "filing_years_full_data",
+            "filing_date_range_in_answer",
+            "table_not_top_countries",
+            "no_duplicate_artifact_titles",
+            "state_changed_false",
+        ],
     },
     {
         "id": "chart_render_contract",
@@ -59,9 +76,35 @@ QUICK_QUESTIONS = [
         "expects": ["chart_artifact", "chart_data_valid"],
     },
     {
-        "id": "filings_chart",
+        "id": "line_or_bar_time_series_prefers_line",
         "prompt": "Create a line chart or bar chart showing filings by year based on filing_date.",
-        "expects": ["chart_artifact", "chart_data_valid"],
+        "expects": ["chart_artifact", "chart_data_valid", "chart_type_line", "filings_chart_fields", "chart_title_not_fake"],
+    },
+    {
+        "id": "line_chart_filings_by_year",
+        "prompt": "Create a line chart showing filings by year based on filing_date.",
+        "expects": ["chart_artifact", "chart_data_valid", "chart_type_line", "filings_chart_fields", "chart_title_not_fake"],
+    },
+    {
+        "id": "pie_chart_no_result_nameerror",
+        "prompt": "create a pie chart for country",
+        "expects": ["chart_artifact", "chart_data_valid", "chart_type_pie", "country_chart_fields", "no_result_nameerror"],
+    },
+    {
+        "id": "conceptual_uses_semantic_verifier",
+        "prompt": "What's in this file?",
+        "expects": [
+            "mentions_patent_metadata",
+            "mentions_record_meaning",
+            "no_raw_dict_preview",
+            "no_llm_skip_trace",
+            "state_changed_false",
+        ],
+    },
+    {
+        "id": "preview_metadata",
+        "prompt": "Convert this dataset into a tabular preview if possible. Show the inferred columns and the first 5 rows.",
+        "expects": ["table_artifact", "preview_row_count_5", "preview_source_total_24410", "state_changed_false"],
     },
     {
         "id": "export_top5",
@@ -284,6 +327,22 @@ def _run_checks(
             checks[expectation] = any(artifact.get("kind") == "chart" for artifact in artifacts)
         elif expectation == "chart_data_valid":
             checks[expectation] = _has_valid_chart_data(artifacts, artifact_contents)
+        elif expectation == "chart_type_line":
+            spec = _first_chart_spec(artifacts, artifact_contents)
+            checks[expectation] = str(spec.get("chart_type") or "").lower() == "line"
+        elif expectation == "chart_type_pie":
+            spec = _first_chart_spec(artifacts, artifact_contents)
+            checks[expectation] = str(spec.get("chart_type") or "").lower() == "pie"
+        elif expectation == "filings_chart_fields":
+            spec = _first_chart_spec(artifacts, artifact_contents)
+            x = str(spec.get("x") or "").lower()
+            y = str(spec.get("y") or "").lower()
+            checks[expectation] = x in {"filing_year", "year"} and y in {"filing_count", "count", "record_count"}
+        elif expectation == "country_chart_fields":
+            spec = _first_chart_spec(artifacts, artifact_contents)
+            checks[expectation] = str(spec.get("x") or "").lower() == "country"
+        elif expectation == "chart_title_not_fake":
+            checks[expectation] = "fake agent chart" not in json.dumps(artifacts, ensure_ascii=False).lower()
         elif expectation == "csv_artifact":
             checks[expectation] = any(artifact.get("kind") == "csv" for artifact in artifacts)
         elif expectation == "no_wrapper_columns":
@@ -303,21 +362,63 @@ def _run_checks(
                 field in answer
                 for field in ("country", "doc_number", "title", "owners", "assignees", "filing_date", "status")
             ) >= 4
+        elif expectation == "mentions_record_meaning":
+            checks[expectation] = "record represents" in answer or "each record" in answer
         elif expectation == "schema_domain_fields":
             checks[expectation] = ("owners" in answer or "assignees" in answer) and "filing_date" in answer
         elif expectation == "no_pydantic_in_answer":
             checks[expectation] = "__pydantic" not in answer and "__dict__" not in answer
         elif expectation == "table_row_count_at_least_3":
             checks[expectation] = _first_table_row_count(artifacts, artifact_contents) >= 3
+        elif expectation == "preview_table_domain_columns":
+            checks[expectation] = _preview_table_has_domain_columns(artifacts, artifact_contents)
+        elif expectation == "table_not_top_countries":
+            checks[expectation] = not _first_table_is_top_countries(artifacts, artifact_contents)
         elif expectation == "table_counts_full_24410":
-            checks[expectation] = _table_analyzed_row_count(artifacts, artifact_contents) in {24_410, 24410}
+            checks[expectation] = (
+                _table_analyzed_row_count(artifacts, artifact_contents) in {24_410, 24410}
+                or _table_count_sum(artifacts, artifact_contents, {"count", "record_count", "patent_count"}) in {24_410, 24410}
+            )
         elif expectation == "not_cn19_ca1_only":
             checks[expectation] = not _looks_like_sample_only_country_result(artifacts, artifact_contents)
         elif expectation == "filing_years_full_data":
             checks[expectation] = (
-                _table_analyzed_row_count(artifacts, artifact_contents) in {24_410, 24410}
+                (
+                    _table_analyzed_row_count(artifacts, artifact_contents) in {24_410, 24410}
+                    or _table_count_sum(artifacts, artifact_contents, {"filing_count", "count", "record_count"})
+                    in {24_410, 24410}
+                )
                 and _first_table_row_count(artifacts, artifact_contents) > 3
             )
+        elif expectation == "exactly_one_filings_by_year_table":
+            checks[expectation] = len(_filings_by_year_tables(artifacts, artifact_contents)) == 1
+        elif expectation == "no_sample_filings_table":
+            checks[expectation] = not any(
+                "sample" in str(document.get("title") or "").lower()
+                for document in _filings_by_year_tables(artifacts, artifact_contents)
+            )
+        elif expectation == "no_duplicate_artifact_titles":
+            titles = [str(artifact.get("title") or artifact.get("name") or "").lower() for artifact in artifacts]
+            checks[expectation] = len(titles) == len(set(titles))
+        elif expectation == "max_execute_python_calls_2":
+            checks[expectation] = sum(1 for event in events if event.get("type") == "code_started") <= 2
+        elif expectation == "filing_date_range_in_answer":
+            checks[expectation] = "filing" in answer and ("range" in answer or "to" in answer) and any(
+                str(year) in answer for year in range(2000, 2027)
+            )
+        elif expectation == "preview_row_count_5":
+            checks[expectation] = any(
+                _numeric(document.get("preview_row_count")) == 5 for document in _table_documents(artifacts, artifact_contents)
+            )
+        elif expectation == "preview_source_total_24410":
+            checks[expectation] = any(
+                _numeric(document.get("source_total_row_count") or document.get("source_row_count")) in {24_410, 24410}
+                for document in _table_documents(artifacts, artifact_contents)
+            ) or _first_table_row_count(artifacts, artifact_contents) == 5
+        elif expectation == "no_llm_skip_trace":
+            checks[expectation] = "Skipping LLM verifier" not in public_trace
+        elif expectation == "no_result_nameerror":
+            checks[expectation] = "NameError: name 'RESULT' is not defined" not in json.dumps(events)
         elif expectation == "clarification_answer":
             checks[expectation] = "please choose the rule" in answer
         elif expectation == "no_python_execution":
@@ -382,6 +483,20 @@ def _has_valid_chart_data(artifacts: list[dict[str, Any]], artifact_contents: di
     return False
 
 
+def _first_chart_spec(artifacts: list[dict[str, Any]], artifact_contents: dict[str, Any]) -> dict[str, Any]:
+    for artifact in artifacts:
+        if artifact.get("kind") != "chart":
+            continue
+        content = artifact_contents.get(artifact.get("id"))
+        spec = (
+            artifact.get("chart_spec")
+            or artifact.get("metadata", {}).get("chart_spec")
+            or (content.get("chart_spec") if isinstance(content, dict) else None)
+        )
+        return spec if isinstance(spec, dict) else {}
+    return {}
+
+
 def _table_documents(artifacts: list[dict[str, Any]], artifact_contents: dict[str, Any]) -> list[dict[str, Any]]:
     documents: list[dict[str, Any]] = []
     for artifact in artifacts:
@@ -411,6 +526,88 @@ def _table_analyzed_row_count(artifacts: list[dict[str, Any]], artifact_contents
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 return int(value)
     return None
+
+
+def _table_count_sum(
+    artifacts: list[dict[str, Any]],
+    artifact_contents: dict[str, Any],
+    count_keys: set[str],
+) -> int | None:
+    for document in _table_documents(artifacts, artifact_contents):
+        rows = document.get("rows")
+        if not isinstance(rows, list):
+            continue
+        total = 0
+        found = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for key in count_keys:
+                value = row.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    total += int(value)
+                    found = True
+                    break
+        if found:
+            return total
+    return None
+
+
+def _numeric(value: Any) -> int | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    return None
+
+
+def _preview_table_has_domain_columns(
+    artifacts: list[dict[str, Any]], artifact_contents: dict[str, Any]
+) -> bool:
+    documents = _table_documents(artifacts, artifact_contents)
+    if not documents:
+        return False
+    keys = _table_keys(documents[0])
+    required = {"country", "doc_number", "title", "owners", "assignees", "filing_date", "status"}
+    return len(keys & required) >= 5
+
+
+def _first_table_is_top_countries(artifacts: list[dict[str, Any]], artifact_contents: dict[str, Any]) -> bool:
+    documents = _table_documents(artifacts, artifact_contents)
+    if not documents:
+        return False
+    first = documents[0]
+    title = str(first.get("title") or "").lower()
+    keys = _table_keys(first)
+    return "top countr" in title or (keys <= {"country", "count", "record_count", "patent_count"} and "country" in keys)
+
+
+def _filings_by_year_tables(
+    artifacts: list[dict[str, Any]], artifact_contents: dict[str, Any]
+) -> list[dict[str, Any]]:
+    output = []
+    for document in _table_documents(artifacts, artifact_contents):
+        keys = _table_keys(document)
+        if keys & {"filing_year", "year"} and keys & {"filing_count", "count", "record_count"}:
+            output.append(document)
+    return output
+
+
+def _table_keys(document: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    columns = document.get("columns") or []
+    if isinstance(columns, list):
+        for column in columns:
+            if isinstance(column, dict):
+                key = column.get("key") or column.get("label")
+            else:
+                key = column
+            if key is not None:
+                keys.add(str(key).lower())
+    rows = document.get("rows")
+    if not keys and isinstance(rows, list):
+        for row in rows[:5]:
+            if isinstance(row, dict):
+                keys.update(str(key).lower() for key in row)
+    return keys
 
 
 def _looks_like_sample_only_country_result(

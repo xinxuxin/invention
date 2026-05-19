@@ -30,9 +30,25 @@ class LLMVerifier:
         deterministic_result: VerificationResult,
         current_step: int,
         turn_started_at: float,
+        force: bool = False,
+        calls_this_turn: int = 0,
     ) -> tuple[LLMVerificationResult | None, str | None]:
-        if not self._allowed(user_message, deterministic_result, current_step, turn_started_at):
-            return None, self._skip_reason(user_message, deterministic_result, current_step, turn_started_at)
+        if not self._allowed(
+            user_message,
+            deterministic_result,
+            current_step,
+            turn_started_at,
+            force=force,
+            calls_this_turn=calls_this_turn,
+        ):
+            return None, self._skip_reason(
+                user_message,
+                deterministic_result,
+                current_step,
+                turn_started_at,
+                force=force,
+                calls_this_turn=calls_this_turn,
+            )
 
         try:
             return self.verify(
@@ -107,21 +123,33 @@ class LLMVerifier:
         deterministic_result: VerificationResult,
         current_step: int,
         turn_started_at: float,
+        force: bool = False,
+        calls_this_turn: int = 0,
     ) -> bool:
         mode = self.settings.verifier_mode.lower()
         if not self.settings.llm_verifier_enabled or mode not in {"llm", "hybrid"}:
+            return False
+        if self.settings.llm_verifier_policy.lower() == "never":
+            return False
+        if calls_this_turn >= self.settings.llm_verifier_max_calls_per_turn:
             return False
         if not self.settings.openai_api_key:
             return False
         if deterministic_result.hard_fail:
             return False
-        if deterministic_result.severity == "retry" and _deterministic_retry_is_authoritative(deterministic_result):
+        if deterministic_result.severity == "retry" and _deterministic_retry_is_authoritative(deterministic_result) and not force:
             return False
-        if current_step > self.settings.verifier_skip_llm_after_step:
+        if current_step > self.settings.verifier_skip_llm_after_step and not force and not _semantic_verification_priority(user_message):
             return False
-        if _semantic_verification_priority(user_message):
+        if self.settings.llm_verifier_policy.lower() == "always":
             return True
-        return time.monotonic() - turn_started_at <= self.settings.verifier_time_budget_per_turn_seconds
+        if force:
+            return self.settings.llm_verifier_repeat_retry_enabled
+        if self.settings.llm_verifier_conceptual_enabled and _semantic_verification_priority(user_message):
+            return True
+        if deterministic_result.severity in {"retry", "finalize_with_warning"} and not _deterministic_retry_is_authoritative(deterministic_result):
+            return True
+        return False
 
     def _skip_reason(
         self,
@@ -129,17 +157,25 @@ class LLMVerifier:
         deterministic_result: VerificationResult,
         current_step: int,
         turn_started_at: float,
+        force: bool = False,
+        calls_this_turn: int = 0,
     ) -> str | None:
+        if not self.settings.show_verifier_debug_trace:
+            return None
         mode = self.settings.verifier_mode.lower()
         if mode == "deterministic" or not self.settings.llm_verifier_enabled:
             return None
+        if self.settings.llm_verifier_policy.lower() == "never":
+            return "LLM verifier skipped by policy."
+        if calls_this_turn >= self.settings.llm_verifier_max_calls_per_turn:
+            return "LLM verifier skipped after reaching the per-turn call limit."
         if not self.settings.openai_api_key:
             return self._fallback_trace("missing API key")
         if deterministic_result.hard_fail or (
             deterministic_result.severity == "retry" and _deterministic_retry_is_authoritative(deterministic_result)
         ):
             return None
-        if current_step > self.settings.verifier_skip_llm_after_step:
+        if current_step > self.settings.verifier_skip_llm_after_step and not force:
             return "Skipping LLM verifier to keep response fast."
         if (
             time.monotonic() - turn_started_at > self.settings.verifier_time_budget_per_turn_seconds
@@ -207,7 +243,26 @@ def _deterministic_retry_is_authoritative(result: VerificationResult) -> bool:
 
 def _semantic_verification_priority(user_message: str) -> bool:
     lowered = user_message.lower()
-    return any(marker in lowered for marker in ("schema", "scalar", "date fields", "list-like", "what is in this file"))
+    return any(
+        marker in lowered
+        for marker in (
+            "schema",
+            "scalar",
+            "date fields",
+            "list-like",
+            "what is in this file",
+            "what is this",
+            "what's in this file",
+            "summarize",
+            "explain",
+            "what does this dataset represent",
+            "important fields",
+            "data quality",
+            "bad records",
+            "duplicates",
+            "invalid dates",
+        )
+    )
 
 
 def _parse_llm_json(text: str) -> dict[str, Any]:

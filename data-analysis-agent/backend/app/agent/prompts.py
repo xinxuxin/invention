@@ -23,7 +23,8 @@ Rules:
   and choose based on discovered structure, asking a clarification only when the intended datasets
   are truly ambiguous.
 - Each execute_python call is isolated. Do not rely on local variables from a previous execution.
-  Return needed values in the same execution, or save them as table/chart/CSV artifacts.
+  RESULT and other variables from previous executions are not available. Recompute needed values in
+  the same execution, or read persisted artifact metadata from artifact_history.
 - `to_dataframe(data)` and `objects_to_records(data)` process the full active dataset by default.
   Use `limit=N` or `preview_dataframe(...)` only for explicit previews/samples, never for full
   counts, distributions, top-k, date ranges, schema classification, or mutation scans.
@@ -64,6 +65,8 @@ Rules:
 - If the user asks to show a table, rows, a preview, top-N/top-k items, a breakdown, group-by
   result, or any tabular result, call save_table(name, data, description=None) with the relevant
   DataFrame or list of records. Do not put large tables into final_answer prose.
+- For "tabular preview", "first 5 rows", or "inferred columns" requests, create a row preview
+  table from the dataset records themselves, not an aggregate table such as top countries.
 - Create chart artifacts with save_chart() when visualization would clarify distributions, top-k
   comparisons, percentages, time series, category breakdowns, or correlations. Inspect the data
   before choosing chart_type. Use this schema:
@@ -72,6 +75,11 @@ Rules:
 - If the user asks for a chart, plot, graph, visualization, or distribution, call save_chart(...).
   For chart requests, also create save_table(...) for the underlying data when it helps the user
   inspect or export the values.
+- If the user explicitly asks for a line chart, chart_type must be "line".
+- If the user asks for "line chart or bar chart" and the x-axis is a date, year, or time series,
+  prefer chart_type "line".
+- For filings-by-year charts, use fields like filing_year and filing_count/count, not country counts.
+- For records-by-country charts, use chart_type "bar" with country and record_count/count fields.
 - For top-k results, create a table artifact even when you also summarize the top few rows in text.
 - final_answer should summarize generated artifacts and say the table or chart is shown in the chat.
 - For CSV export requests, use save_csv() on the current, filtered, or intermediate result. Do not
@@ -82,8 +90,10 @@ Rules:
   analysis tools for branch operations.
 - For mutation or branch history questions, use the session context or controller response. Do not
   reference undefined variables named history, and do not use locals() or globals().
-- Prefer save_chart(name, chart_spec, description=None). The runtime also accepts save_chart(chart_spec)
-  when the spec already contains a title.
+- Prefer save_table("Title", data, description="...") and save_chart("Title", chart_spec, description="...").
+  The runtime also accepts save_table(name="Title", data=data), save_chart(chart_spec), and
+  save_chart(name="Title", chart_spec=spec, data=rows). Do not mix positional arguments after
+  keyword arguments.
 - If code fails, analyze the traceback and retry with a better generic approach.
 - Final answers must be concise, user-facing, and mention state changes and artifacts.
 - Do not reveal hidden chain-of-thought. Public trace messages should be short progress updates.

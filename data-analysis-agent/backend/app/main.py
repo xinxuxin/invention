@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,13 +12,23 @@ from app.api.export import router as export_router
 from app.api.health import router as health_router
 from app.api.history import router as history_router
 from app.api.sessions import router as sessions_router
-from app.core.config import get_settings
+from app.core.config import get_settings, resolved_agent_mode
 from app.db.session import init_db
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_db()
+    settings = get_settings()
+    logger.info(
+        "Agent mode: %s; verifier mode: %s; LLM verifier enabled: %s; OpenAI key configured: %s",
+        resolved_agent_mode(settings),
+        settings.verifier_mode,
+        settings.llm_verifier_enabled,
+        bool(settings.openai_api_key),
+    )
     yield
 
 

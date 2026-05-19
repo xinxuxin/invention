@@ -741,7 +741,15 @@ def test_clean_dataset_prompt_asks_clarification_without_python(client: TestClie
 
 
 def test_specific_destructive_prompt_can_proceed_to_confirmation(client: TestClient) -> None:
-    session_id, dataset_id = _create_dataset(client)
+    session_response = client.post("/api/sessions", json={"name": "Agent test"})
+    assert session_response.status_code == 201
+    session_id = session_response.json()["id"]
+    dataset_id = _upload_frame(
+        client,
+        session_id,
+        "titles.pkl",
+        pd.DataFrame({"title": ["A", "", None], "group": ["a", "b", "c"]}),
+    )
     fake = ScriptedModelClient(
         [
             _tool_response(
@@ -763,7 +771,7 @@ def test_specific_destructive_prompt_can_proceed_to_confirmation(client: TestCli
     events = _parse_sse(response.text)
 
     assert response.status_code == 200
-    assert fake.calls == 1
+    assert fake.calls == 0
     assert any(event["type"] == "confirmation_required" for event in events)
 
 
@@ -867,6 +875,79 @@ def test_mutation_history_shortcut_does_not_call_python(client: TestClient) -> N
     assert "Current branch" in answer
     assert "NameError" not in answer
     assert events[-2]["state_changed"] is False
+
+
+def test_filing_date_retry_discards_sample_artifact_and_dedupes(client: TestClient) -> None:
+    session_response = client.post("/api/sessions", json={"name": "Filing date transaction test"})
+    session_id = session_response.json()["id"]
+    frame = pd.DataFrame(
+        {
+            "filing_date": pd.to_datetime(["2020-01-01", "2020-02-01", "2021-03-01", "2021-04-01"]),
+            "country": ["US", "CA", "US", "CN"],
+            "title": ["A", "B", "C", "D"],
+        }
+    )
+    dataset_id = _upload_frame(client, session_id, "filings.pkl", frame)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "sample = to_dataframe(data, limit=2)",
+                            "dates = pd.to_datetime(sample['filing_date'], errors='coerce')",
+                            "grouped = dates.dropna().dt.year.value_counts().sort_index().reset_index()",
+                            "grouped.columns = ['filing_year', 'filing_count']",
+                            "grouped.attrs['source_total_row_count'] = len(data)",
+                            "grouped.attrs['source_row_count'] = len(data)",
+                            "grouped.attrs['analyzed_row_count'] = len(sample)",
+                            "save_table('Filings by year (sample)', grouped)",
+                            "RESULT = {'filing_date_min': dates.min().date().isoformat(), 'filing_date_max': dates.max().date().isoformat(), 'source_total_row_count': len(data), 'analyzed_row_count': len(sample)}",
+                        ]
+                    )
+                },
+            ),
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "df = to_dataframe(data, limit=None)",
+                            "dates = pd.to_datetime(df['filing_date'], errors='coerce')",
+                            "grouped = dates.dropna().dt.year.value_counts().sort_index().reset_index()",
+                            "grouped.columns = ['filing_year', 'filing_count']",
+                            "grouped.attrs['source_total_row_count'] = len(df)",
+                            "grouped.attrs['source_row_count'] = len(df)",
+                            "grouped.attrs['analyzed_row_count'] = len(df)",
+                            "save_table('Filings by year (filing_date)', grouped)",
+                            "RESULT = {'filing_date_min': dates.min().date().isoformat(), 'filing_date_max': dates.max().date().isoformat(), 'source_total_row_count': len(df), 'analyzed_row_count': len(df)}",
+                        ]
+                    )
+                },
+            ),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={
+            "message": "What is the filing date range of this portfolio? Also summarize the number of filings by year in a table.",
+            "active_dataset_id": dataset_id,
+        },
+    )
+    events = _parse_sse(response.text)
+    artifacts = [event["artifact"] for event in events if event["type"] == "artifact_created"]
+
+    assert response.status_code == 200
+    assert len([event for event in events if event["type"] == "code_result_summary"]) == 2
+    assert len(artifacts) == 1
+    assert artifacts[0]["title"] == "Filings by year (filing_date)"
+    assert "sample" not in artifacts[0]["title"].lower()
+    assert [column["key"] for column in artifacts[0]["columns"]] == ["filing_year", "filing_count"]
+    assert events[-2]["type"] == "final_answer"
+    assert "step budget" not in events[-2]["answer"].lower()
 
 
 def _tool_response(name: str, arguments: dict) -> AgentModelResponse:

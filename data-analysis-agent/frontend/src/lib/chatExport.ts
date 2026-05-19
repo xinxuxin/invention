@@ -93,6 +93,9 @@ function formatTrace(trace: ChatTraceEvent) {
 
   if (trace.type === "code_result_summary") {
     const lines = [`Status: ${trace.ok ? "completed" : "failed"}`];
+    if (trace.resultSummary) {
+      lines.push("", "summary:", fenced(JSON.stringify(trace.resultSummary, null, 2), "json"));
+    }
     if (trace.stdout) {
       lines.push("", "stdout:", fenced(trace.stdout, "text"));
     }

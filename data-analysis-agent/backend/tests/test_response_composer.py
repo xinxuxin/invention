@@ -36,8 +36,11 @@ def test_inspection_answer_summarizes_preview_without_raw_dict() -> None:
 
     assert "{'object_type':" not in answer.markdown
     assert "... truncated ..." not in answer.markdown
+    assert "patent portfolio metadata dataset" in answer.markdown
+    assert "patent or patent-application metadata entry" in answer.markdown
     assert "Object type: list" in answer.markdown
     assert "Records/items observed: 24,410" in answer.markdown
+    assert "Identifier fields" in answer.markdown
     assert answer.markdown.count("State changed") == 1
 
 

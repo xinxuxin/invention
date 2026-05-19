@@ -271,7 +271,7 @@ def test_preview_dataframe_limits_without_changing_full_dataframe(db_session: Se
 
     result = executor.execute(
         session_id,
-        "df = to_dataframe(data)\npreview_df = preview_dataframe(data, limit=20)\nRESULT = {'full_rows': len(df), 'preview_rows': len(preview_df), 'preview': preview(df)}",
+        "df = to_dataframe(data)\npreview_df = preview_dataframe(data, limit=20)\nRESULT = {'full_rows': len(df), 'preview_rows': len(preview_df), 'preview': preview(df), 'preview_df': preview(preview_df)}",
         active_dataset_id=dataset_id,
     )
 
@@ -279,7 +279,14 @@ def test_preview_dataframe_limits_without_changing_full_dataframe(db_session: Se
     assert result.result_preview["full_rows"] == 100
     assert result.result_preview["preview_rows"] == 20
     assert result.result_preview["preview"]["shape"] == [100, 2]
+    assert result.result_preview["preview"]["source_total_row_count"] == 100
+    assert result.result_preview["preview"]["preview_row_count"] == 20
+    assert result.result_preview["preview"]["is_preview"] is False
     assert len(result.result_preview["preview"]["rows"]) == 20
+    assert result.result_preview["preview_df"]["source_total_row_count"] == 100
+    assert result.result_preview["preview_df"]["preview_row_count"] == 20
+    assert result.result_preview["preview_df"]["analyzed_row_count"] == 20
+    assert result.result_preview["preview_df"]["is_preview"] is True
 
 
 def test_execute_python_calls_are_isolated(db_session: Session) -> None:
@@ -763,6 +770,22 @@ def test_save_chart_accepts_keyword_data_merge(db_session: Session) -> None:
     assert result.ok is True
     assert artifact.chart_spec is not None
     assert artifact.chart_spec["data"] == [{"country": "A", "count": 3}]
+
+
+def test_save_csv_accepts_data_only_argument(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "save_csv(data.head(1))",
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    artifact = next(item for item in result.artifacts if item.kind == "csv")
+    assert artifact.title == "CSV export"
+    assert artifact.metadata["row_count"] == 1
 
 
 def test_invalid_chart_artifact_returns_traceback(db_session: Session) -> None:

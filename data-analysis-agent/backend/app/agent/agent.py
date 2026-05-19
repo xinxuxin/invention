@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+import pandas as pd
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
@@ -19,7 +20,7 @@ from app.agent.verifier import ResultVerifier, merge_verification_results, verif
 from app.agent.llm_verifier import LLMVerifier
 from app.core.config import get_settings
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
-from app.runtime.python_executor import ExecutionResult, PythonExecutor, to_dataframe
+from app.runtime.python_executor import ExecutionArtifact, ExecutionResult, PythonExecutor, object_to_record, to_dataframe
 from app.services.versioning import (
     active_branch,
     apply_version_to_dataset,
@@ -142,7 +143,7 @@ class FakeAgentModelClient:
                 return _fake_tool_response(
                     "execute_python",
                     {
-                        "code": _fake_table_code(),
+                        "code": _fake_table_code(prompt),
                         "mutates_state": False,
                     },
                 )
@@ -150,7 +151,7 @@ class FakeAgentModelClient:
                 return _fake_tool_response(
                     "execute_python",
                     {
-                        "code": _fake_chart_code(),
+                        "code": _fake_chart_code(prompt),
                         "mutates_state": False,
                     },
                 )
@@ -251,7 +252,7 @@ class FakeAgentModelClient:
             return _fake_tool_response(
                 "execute_python",
                 {
-                    "code": _fake_table_code(),
+                    "code": _fake_table_code(prompt),
                     "mutates_state": False,
                 },
             )
@@ -394,7 +395,10 @@ class CodingAgent:
         state_changed = False
         last_execution_result: ExecutionResult | None = None
         informative_execution_result: ExecutionResult | None = None
-        artifacts_for_message: list[Any] = []
+        verified_artifacts_for_message: list[Any] = []
+        latest_pending_artifacts: list[Any] = []
+        retry_reason_history: dict[str, int] = {}
+        llm_calls_this_turn = 0
 
         for step_index in range(max_steps):
             try:
@@ -439,7 +443,7 @@ class CodingAgent:
                                         user_message=request.message,
                                         execution_result=last_execution_result,
                                         artifacts_created_this_turn=[],
-                                        all_artifacts_for_message=artifacts_for_message,
+                                        all_artifacts_for_message=verified_artifacts_for_message,
                                         current_step=step_index,
                                         max_steps=max_steps,
                                         retries_remaining=False,
@@ -491,12 +495,7 @@ class CodingAgent:
                         if _execution_has_user_value(result) or informative_execution_result is None:
                             informative_execution_result = result
                         state_changed = state_changed or bool(result.updated_datasets)
-                        artifacts_for_message.extend(result.artifacts)
-                        for artifact in result.artifacts:
-                            yield {
-                                "type": "artifact_created",
-                                "artifact": artifact.model_dump(mode="json"),
-                            }
+                        latest_pending_artifacts = result.artifacts
 
                         yield {
                             "type": "code_result_summary",
@@ -504,6 +503,7 @@ class CodingAgent:
                             "stdout": result.stdout[:1000],
                             "stderr": result.stderr[:1000],
                             "traceback": _short_traceback(result.traceback),
+                            "result_summary": _execution_result_summary(result),
                             "result_preview": result.result_preview,
                             "updated_datasets": [
                                 item.model_dump(mode="json") for item in result.updated_datasets
@@ -519,7 +519,7 @@ class CodingAgent:
                             user_message=request.message,
                             execution_result=result,
                             artifacts_created_this_turn=result.artifacts,
-                            all_artifacts_for_message=artifacts_for_message,
+                            all_artifacts_for_message=verified_artifacts_for_message,
                             current_step=step_index + 1,
                             max_steps=max_steps,
                             retries_remaining=(
@@ -530,17 +530,26 @@ class CodingAgent:
                             confirmation_status="approved" if request.confirmed else None,
                             latest_code=code,
                         )
+                        repeated_reason = _verification_reason_key(deterministic)
+                        repeated_retry = (
+                            deterministic.severity == "retry"
+                            and retry_reason_history.get(repeated_reason, 0) >= 1
+                        )
                         llm_verification, llm_trace = self.llm_verifier.verify_if_allowed(
                             user_message=request.message,
                             context=context,
                             execution_result=result,
-                            artifacts=artifacts_for_message,
+                            artifacts=[*verified_artifacts_for_message, *result.artifacts],
                             state_changed=state_changed,
                             latest_code=code,
                             deterministic_result=deterministic,
                             current_step=step_index + 1,
                             turn_started_at=turn_started_at,
+                            force=repeated_retry,
+                            calls_this_turn=llm_calls_this_turn,
                         )
+                        if llm_verification is not None:
+                            llm_calls_this_turn += 1
                         if llm_trace:
                             yield {"type": "trace", "message": llm_trace}
                         verification = merge_verification_results(
@@ -548,6 +557,61 @@ class CodingAgent:
                             llm_verification,
                             min_confidence=settings.llm_verifier_min_confidence,
                         )
+                        if verification.severity == "retry" and (
+                            failed_execution_attempts < max_retries
+                            and verifier_retry_attempts < max_retries
+                        ):
+                            reason_key = _verification_reason_key(verification)
+                            retry_reason_history[reason_key] = retry_reason_history.get(reason_key, 0) + 1
+                            if retry_reason_history[reason_key] >= 2 and _artifact_matches_request(
+                                request.message, result.artifacts
+                            ):
+                                verification = verification.model_copy(
+                                    update={
+                                        "passed": True,
+                                        "severity": "finalize_with_warning",
+                                        "should_finalize": True,
+                                        "reasons": [
+                                            "Repeated verifier retry matched the latest artifact; finalizing with the best matching result."
+                                        ],
+                                    }
+                                )
+                            else:
+                                verifier_retry_attempts += 1
+                                verifier_feedback = verification.retry_instruction
+                                _mark_artifacts_status(self.db, result.artifacts, "discarded")
+                                yield {
+                                    "type": "verifier_result",
+                                    "message": verifier_trace_message(verification),
+                                    "passed": verification.passed,
+                                    "severity": verification.severity,
+                                    "source": verification.source,
+                                    "reasons": verification.reasons,
+                                }
+                                if not result.ok:
+                                    yield {
+                                        "type": "trace",
+                                        "message": "The Python attempt failed; retrying with the traceback context...",
+                                    }
+                                yield {
+                                    "type": "trace",
+                                    "message": verifier_trace_message(verification),
+                                }
+                                input_items.append(
+                                    {
+                                        "type": "function_call_output",
+                                        "call_id": tool_call.id,
+                                        "output": json.dumps(
+                                            {
+                                                **tool_execution.output,
+                                                "verifier": verification.model_dump(mode="json"),
+                                            },
+                                            default=str,
+                                        ),
+                                    }
+                                )
+                                continue
+
                         yield {
                             "type": "verifier_result",
                             "message": verifier_trace_message(verification),
@@ -556,36 +620,6 @@ class CodingAgent:
                             "source": verification.source,
                             "reasons": verification.reasons,
                         }
-
-                        if verification.severity == "retry" and (
-                            failed_execution_attempts < max_retries
-                            and verifier_retry_attempts < max_retries
-                        ):
-                            verifier_retry_attempts += 1
-                            verifier_feedback = verification.retry_instruction
-                            if not result.ok:
-                                yield {
-                                    "type": "trace",
-                                    "message": "The Python attempt failed; retrying with the traceback context...",
-                                }
-                            yield {
-                                "type": "trace",
-                                "message": verifier_trace_message(verification),
-                            }
-                            input_items.append(
-                                {
-                                    "type": "function_call_output",
-                                    "call_id": tool_call.id,
-                                    "output": json.dumps(
-                                        {
-                                            **tool_execution.output,
-                                            "verifier": verification.model_dump(mode="json"),
-                                        },
-                                        default=str,
-                                    ),
-                                }
-                            )
-                            continue
 
                         if verification.severity == "fail" or not result.ok:
                             yield {
@@ -602,6 +636,15 @@ class CodingAgent:
                             return
 
                         if verification.should_finalize or verification.passed:
+                            verified_artifacts_for_message = dedupe_artifacts_for_message(
+                                [
+                                    *verified_artifacts_for_message,
+                                    *[_artifact_with_status(artifact, "verified") for artifact in result.artifacts],
+                                ]
+                            )
+                            _mark_artifacts_status(self.db, verified_artifacts_for_message, "verified")
+                            for artifact in verified_artifacts_for_message:
+                                yield _artifact_created_event(artifact)
                             yield {
                                 "type": "trace",
                                 "message": "Found enough information; verified result; composing final answer...",
@@ -609,7 +652,7 @@ class CodingAgent:
                             answer = self.response_composer.compose(
                                 user_message=request.message,
                                 execution_result=result,
-                                artifacts=artifacts_for_message,
+                                artifacts=verified_artifacts_for_message,
                                 verification=verification,
                                 state_changed=state_changed,
                                 mutation_summary=arguments.get("mutation_summary"),
@@ -686,7 +729,7 @@ class CodingAgent:
                             user_message=request.message,
                             execution_result=informative_execution_result or last_execution_result,
                             artifacts_created_this_turn=[],
-                            all_artifacts_for_message=artifacts_for_message,
+                            all_artifacts_for_message=verified_artifacts_for_message,
                             current_step=step_index + 1,
                             max_steps=max_steps,
                             retries_remaining=verifier_retry_attempts < max_retries,
@@ -709,12 +752,12 @@ class CodingAgent:
                         composed = self.response_composer.compose(
                             user_message=request.message,
                             execution_result=informative_execution_result or last_execution_result,
-                            artifacts=artifacts_for_message,
+                            artifacts=verified_artifacts_for_message,
                             verification=verification,
                             state_changed=bool(arguments.get("state_changed", False)) or state_changed,
                             mutation_summary=None,
                         )
-                        if answer and not artifacts_for_message and informative_execution_result is None:
+                        if answer and not verified_artifacts_for_message and informative_execution_result is None:
                             composed.markdown = answer
                         yield composed_answer_event(composed)
                         yield {"type": "message_done"}
@@ -727,7 +770,7 @@ class CodingAgent:
                     user_message=request.message,
                     execution_result=informative_execution_result or last_execution_result,
                     artifacts_created_this_turn=[],
-                    all_artifacts_for_message=artifacts_for_message,
+                    all_artifacts_for_message=verified_artifacts_for_message,
                     current_step=step_index + 1,
                     max_steps=max_steps,
                     retries_remaining=False,
@@ -737,11 +780,11 @@ class CodingAgent:
                 composed = self.response_composer.compose(
                     user_message=request.message,
                     execution_result=informative_execution_result or last_execution_result,
-                    artifacts=artifacts_for_message,
+                    artifacts=verified_artifacts_for_message,
                     verification=verification,
                     state_changed=state_changed,
                 )
-                if not artifacts_for_message and informative_execution_result is None:
+                if not verified_artifacts_for_message and informative_execution_result is None:
                     composed.markdown = model_response.final_text
                 yield composed_answer_event(composed)
                 yield {"type": "message_done"}
@@ -759,7 +802,7 @@ class CodingAgent:
             user_message=request.message,
             execution_result=informative_execution_result or last_execution_result,
             artifacts_created_this_turn=[],
-            all_artifacts_for_message=artifacts_for_message,
+            all_artifacts_for_message=verified_artifacts_for_message,
             current_step=max_steps,
             max_steps=max_steps,
             retries_remaining=False,
@@ -767,20 +810,26 @@ class CodingAgent:
         )
         verification = verification.model_copy(
             update={
-                "severity": "finalize_with_warning" if informative_execution_result or artifacts_for_message else "fail",
-                "should_finalize": bool(informative_execution_result or artifacts_for_message),
+                "severity": "finalize_with_warning" if informative_execution_result or verified_artifacts_for_message or latest_pending_artifacts else "fail",
+                "should_finalize": bool(informative_execution_result or verified_artifacts_for_message or latest_pending_artifacts),
                 "reasons": [
                     "Step budget reached; using the best verified result available."
-                    if informative_execution_result or artifacts_for_message
+                    if informative_execution_result or verified_artifacts_for_message or latest_pending_artifacts
                     else "Step budget reached before a useful result was available."
                 ],
             }
         )
-        if informative_execution_result or artifacts_for_message:
+        fallback_artifacts = verified_artifacts_for_message or [
+            _artifact_with_status(artifact, "pending_verification") for artifact in latest_pending_artifacts[-1:]
+        ]
+        if informative_execution_result or fallback_artifacts:
+            fallback_artifacts = dedupe_artifacts_for_message(fallback_artifacts, include_pending=True)
+            for artifact in fallback_artifacts:
+                yield _artifact_created_event(artifact)
             answer = self.response_composer.compose(
                 user_message=request.message,
                 execution_result=informative_execution_result or last_execution_result,
-                artifacts=artifacts_for_message,
+                artifacts=fallback_artifacts,
                 verification=verification,
                 state_changed=state_changed,
             )
@@ -877,7 +926,7 @@ class CodingAgent:
 
         if (
             any(term in lowered for term in ("delete", "remove", "drop"))
-            and any(term in lowered for term in ("empty title", "blank title", "null title"))
+            and any(term in lowered for term in ("empty title", "missing title", "missing titles", "blank title", "null title"))
         ):
             return self._confirm_delete_empty_title(session_id, request)
 
@@ -922,6 +971,8 @@ class CodingAgent:
             operation_summary=f"Delete the last {delete_count:,} records from the current working dataset",
             risk_level="high",
             metadata={
+                "operation_kind": "delete_last_n",
+                "delete_count": delete_count,
                 "current_row_count": current_count,
                 "new_row_count": new_count,
                 "affected_count": delete_count,
@@ -944,9 +995,8 @@ class CodingAgent:
         if dataset is None:
             return [{"type": "error", "message": "No active dataset is available for deletion."}]
         value = load_pickle(Path(dataset.current_snapshot_path))
-        frame = to_dataframe(value, limit=None)
-        current_count = int(len(frame))
-        if "title" not in frame.columns:
+        current_count, affected_count, has_title = _scan_empty_title(value)
+        if not has_title:
             return [
                 {"type": "trace", "message": "Scanned the full dataset for a title field..."},
                 {
@@ -955,9 +1005,6 @@ class CodingAgent:
                     "state_changed": False,
                 },
             ]
-        title_values = frame["title"]
-        empty_mask = title_values.isna() | title_values.astype(str).str.strip().eq("")
-        affected_count = int(empty_mask.sum())
         if affected_count == 0:
             return [
                 {"type": "trace", "message": "Scanned the full dataset for empty titles..."},
@@ -1007,6 +1054,7 @@ class CodingAgent:
             operation_summary="Remove records where `title` is missing, null, or blank",
             risk_level="medium",
             metadata={
+                "operation_kind": "delete_empty_title",
                 "current_row_count": current_count,
                 "new_row_count": new_count,
                 "affected_count": affected_count,
@@ -1565,6 +1613,37 @@ def _expected_effect(summary: str, dataset_name: str, metadata: Mapping[str, Any
     return f"The working state for `{dataset_name}` will be updated if you approve.{count_text}"
 
 
+def _scan_empty_title(value: Any) -> tuple[int, int, bool]:
+    if isinstance(value, pd.DataFrame):
+        current_count = int(len(value))
+        if "title" not in value.columns:
+            return current_count, 0, False
+        title_values = value["title"]
+        affected_count = int((title_values.isna() | title_values.astype(str).str.strip().eq("")).sum())
+        return current_count, affected_count, True
+
+    if isinstance(value, (list, tuple)):
+        current_count = len(value)
+        has_title = False
+        affected_count = 0
+        for item in value:
+            record = object_to_record(item)
+            if "title" in record:
+                has_title = True
+                title = record.get("title")
+                if title is None or (isinstance(title, str) and title.strip() == ""):
+                    affected_count += 1
+        return current_count, affected_count, has_title
+
+    frame = to_dataframe(value, limit=None)
+    current_count = int(len(frame))
+    if "title" not in frame.columns:
+        return current_count, 0, False
+    title_values = frame["title"]
+    affected_count = int((title_values.isna() | title_values.astype(str).str.strip().eq("")).sum())
+    return current_count, affected_count, True
+
+
 def _branch_exists(session_id: str, name: str, db: Session) -> bool:
     return (
         db.exec(select(Branch).where(Branch.session_id == session_id).where(Branch.name == name)).first()
@@ -1743,6 +1822,143 @@ def _latest_user_request(input_items: list[dict[str, Any]]) -> str:
     return request.split("Respond by using", maxsplit=1)[0].strip()
 
 
+def _artifact_with_status(artifact: ExecutionArtifact, status: str) -> ExecutionArtifact:
+    metadata = dict(artifact.metadata)
+    metadata["status"] = status
+    semantic_key = artifact.semantic_key or str(metadata.get("semantic_key") or _artifact_semantic_key(artifact))
+    metadata["semantic_key"] = semantic_key
+    return artifact.model_copy(update={"metadata": metadata, "status": status, "semantic_key": semantic_key})
+
+
+def _artifact_created_event(artifact: ExecutionArtifact) -> dict[str, Any]:
+    return {"type": "artifact_created", "artifact": artifact.model_dump(mode="json")}
+
+
+def _mark_artifacts_status(db: Session, artifacts: Sequence[ExecutionArtifact], status: str) -> None:
+    if not artifacts:
+        return
+    for artifact_ref in artifacts:
+        artifact = db.get(Artifact, artifact_ref.id)
+        if artifact is None:
+            continue
+        metadata = artifact.artifact_metadata if isinstance(artifact.artifact_metadata, dict) else {}
+        metadata = dict(metadata)
+        metadata["status"] = status
+        metadata.setdefault("semantic_key", artifact_ref.semantic_key or _artifact_semantic_key(artifact_ref))
+        artifact.artifact_metadata = metadata
+        db.add(artifact)
+    db.commit()
+
+
+def dedupe_artifacts_for_message(
+    artifacts: list[ExecutionArtifact],
+    *,
+    include_pending: bool = False,
+) -> list[ExecutionArtifact]:
+    kept: dict[str, ExecutionArtifact] = {}
+    order: list[str] = []
+    for artifact in artifacts:
+        status = artifact.status or artifact.metadata.get("status") or "verified"
+        if status not in {"verified", "pending_verification"}:
+            continue
+        if status == "pending_verification" and not include_pending:
+            continue
+        key = artifact.semantic_key or str(artifact.metadata.get("semantic_key") or _artifact_semantic_key(artifact))
+        if key not in order:
+            order.append(key)
+        kept[key] = artifact
+    priority = {"table": 0, "chart": 1, "csv": 2, "json": 3}
+    indexed = {key: index for index, key in enumerate(order)}
+    return sorted(
+        (kept[key] for key in order),
+        key=lambda item: (
+            priority.get(item.kind, 9),
+            indexed.get(item.semantic_key or str(item.metadata.get("semantic_key") or _artifact_semantic_key(item)), 999),
+        ),
+    )
+
+
+def _artifact_semantic_key(artifact: ExecutionArtifact) -> str:
+    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
+    title = f"{artifact.title or artifact.name} {metadata.get('description') or ''}".lower()
+    keys = {
+        str(column.get("key") or column.get("label") or "").lower()
+        for column in artifact.columns
+        if isinstance(column, Mapping)
+    }
+    if artifact.kind == "table":
+        if {"filing_year", "year"} & keys and any(_is_count_key(key) for key in keys):
+            return "filings_by_year_table"
+        if "country" in keys and any(_is_count_key(key) for key in keys):
+            return "top_countries_table"
+        if "schema" in title:
+            return "schema_summary_table"
+        if "preview" in title or "first" in title:
+            return "tabular_preview_table"
+    if artifact.kind == "chart":
+        spec = artifact.chart_spec or metadata.get("chart_spec") or {}
+        if isinstance(spec, Mapping):
+            x = str(spec.get("x") or "").lower()
+            y = str(spec.get("y") or "").lower()
+            if x in {"filing_year", "year"} and _is_count_key(y):
+                return "filings_by_year_chart"
+            if x == "country":
+                return "country_distribution_chart"
+    if artifact.kind == "csv":
+        return "csv_export"
+    normalized = "".join(character if character.isalnum() else "_" for character in (artifact.title or artifact.name).lower())
+    return f"{artifact.kind}_{normalized.strip('_') or artifact.id}"
+
+
+def _is_count_key(key: str) -> bool:
+    return key in {"count", "record_count", "patent_count", "filing_count"} or key.endswith("_count")
+
+
+def _artifact_matches_request(message: str, artifacts: list[ExecutionArtifact]) -> bool:
+    lowered = message.lower()
+    keys = {_artifact_semantic_key(artifact) for artifact in artifacts}
+    if "filing" in lowered and ("filings_by_year_table" in keys or "filings_by_year_chart" in keys):
+        return True
+    if "country" in lowered and ("top_countries_table" in keys or "country_distribution_chart" in keys):
+        return True
+    if any(marker in lowered for marker in ("preview", "first 5 rows", "inferred columns")) and "tabular_preview_table" in keys:
+        return True
+    if "chart" in lowered and any(artifact.kind == "chart" for artifact in artifacts):
+        return True
+    if "table" in lowered and any(artifact.kind == "table" for artifact in artifacts):
+        return True
+    return False
+
+
+def _verification_reason_key(verification: Any) -> str:
+    if verification.reasons:
+        return str(verification.reasons[0]).lower()
+    return str(verification.retry_instruction or verification.severity).lower()
+
+
+def _execution_result_summary(result: ExecutionResult) -> dict[str, Any]:
+    preview = result.result_preview
+    summary: dict[str, Any] = {
+        "ok": result.ok,
+        "artifact_count": len(result.artifacts),
+        "state_changed": bool(result.updated_datasets),
+    }
+    if isinstance(preview, Mapping):
+        summary["result_type"] = preview.get("type") or "object"
+        if isinstance(preview.get("shape"), list):
+            summary["shape"] = preview.get("shape")
+        if isinstance(preview.get("rows"), list):
+            summary["preview_rows"] = len(preview["rows"])
+        if preview.get("source_total_row_count") is not None:
+            summary["source_total_row_count"] = preview.get("source_total_row_count")
+    elif isinstance(preview, list):
+        summary["result_type"] = "list"
+        summary["preview_items"] = len(preview)
+    elif preview is not None:
+        summary["result_type"] = type(preview).__name__
+    return summary
+
+
 def _fake_chart_code(prompt: str = "") -> str:
     request_text = json.dumps(prompt)
     return "\n".join(
@@ -1755,9 +1971,9 @@ def _fake_chart_code(prompt: str = "") -> str:
             "elif 'filing_date' in df.columns and ('year' in request_text or 'filing' in request_text):",
             "    dates = pd.to_datetime(df['filing_date'], errors='coerce')",
             "    grouped = dates.dropna().dt.year.value_counts().sort_index().reset_index()",
-            "    grouped.columns = ['filing_year', 'record_count']",
+            "    grouped.columns = ['filing_year', 'filing_count']",
             "    rows = grouped.to_dict('records')",
-            "    x, y, title = 'filing_year', 'record_count', 'Filings by year'",
+            "    x, y, title = 'filing_year', 'filing_count', 'Patent filings by year'",
             "elif 'country' in df.columns:",
             "    grouped = df['country'].astype(str).value_counts().head(15).reset_index()",
             "    grouped.columns = ['country', 'record_count']",
@@ -1779,18 +1995,34 @@ def _fake_chart_code(prompt: str = "") -> str:
             "if not rows:",
             "    rows = [{'name': key, 'size': len(value) if hasattr(value, '__len__') else 1} for key, value in datasets.items()]",
             "    x, y, title = 'name', 'size', 'Dataset sizes'",
-            "save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': x, 'y': y, 'description': title + ' generated from the full active dataset'})",
+            "if 'pie chart' in request_text and x == 'country':",
+            "    chart_type = 'pie'",
+            "elif ('line chart' in request_text or ('line chart or bar chart' in request_text and ('filing' in request_text or 'year' in request_text or 'date' in request_text))) and x in {'filing_year', 'year'}:",
+            "    chart_type = 'line'",
+            "else:",
+            "    chart_type = 'bar'",
+            "save_chart(title, {'title': title, 'chart_type': chart_type, 'data': rows, 'x': x, 'y': y, 'description': title + ' generated from the full active dataset'})",
             "save_table('Chart source data', rows, description='Underlying data for the chart')",
             "preview({'rows': rows[:20], 'source_row_count': len(df), 'analyzed_row_count': len(df)})",
         ]
     )
 
 
-def _fake_table_code() -> str:
+def _fake_table_code(prompt: str = "") -> str:
+    request_text = json.dumps(prompt)
     return "\n".join(
         [
+            f"request_text = {request_text}",
             "df = to_dataframe(data, limit=None)",
-            "if 'country' in df.columns:",
+            "if 'filing_date' in df.columns and ('filing date range' in request_text or 'filings by year' in request_text):",
+            "    dates = pd.to_datetime(df['filing_date'], errors='coerce')",
+            "    grouped = dates.dropna().dt.year.value_counts().sort_index().reset_index()",
+            "    grouped.columns = ['filing_year', 'filing_count']",
+            "    grouped.attrs['source_row_count'] = len(df)",
+            "    grouped.attrs['analyzed_row_count'] = len(df)",
+            "    save_table('Patent filings by year', grouped, description='Full-dataset filing counts by year')",
+            "    RESULT = {'filing_date_min': dates.min().date().isoformat() if dates.notna().any() else None, 'filing_date_max': dates.max().date().isoformat() if dates.notna().any() else None, 'columns': list(grouped.columns), 'rows': grouped.to_dict('records'), 'source_row_count': len(df), 'analyzed_row_count': len(df)}",
+            "elif 'top' in request_text and 'country' in df.columns:",
             "    rows = df['country'].astype(str).value_counts().head(10).reset_index()",
             "    rows.columns = ['country', 'record_count']",
             "    rows.attrs['source_row_count'] = len(df)",
@@ -1800,7 +2032,7 @@ def _fake_table_code() -> str:
             "else:",
             "    preview_df = df.head(5)",
             "    save_table('Tabular preview', preview_df, description='First rows converted with generic helpers')",
-            "    preview({'columns': list(df.columns), 'rows': preview_df.to_dict('records')})",
+            "    preview({'columns': list(df.columns), 'rows': preview_df.to_dict('records'), 'source_row_count': len(df), 'analyzed_row_count': len(df)})",
         ]
     )
 

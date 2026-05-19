@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1"
     agent_model_mode: str = "openai"
+    agent_mode: str | None = None
+    fake_agent_mode: bool = False
     agent_max_steps: int = 6
     agent_max_retries: int = 3
     verifier_mode: str = "hybrid"
@@ -22,6 +24,10 @@ class Settings(BaseSettings):
     llm_verifier_min_confidence: float = 0.70
     llm_verifier_fail_open: bool = True
     llm_verifier_hard_rule_authority: bool = False
+    llm_verifier_policy: str = "selective"
+    llm_verifier_conceptual_enabled: bool = True
+    llm_verifier_repeat_retry_enabled: bool = True
+    llm_verifier_max_calls_per_turn: int = 1
     show_verifier_debug_trace: bool = False
     verifier_time_budget_per_turn_seconds: int = 8
     verifier_skip_llm_after_step: int = 4
@@ -47,3 +53,14 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def resolved_agent_mode(settings: Settings | None = None) -> str:
+    current = settings or get_settings()
+    if current.fake_agent_mode:
+        return "fake"
+    if (current.agent_mode or "").lower() == "fake":
+        return "fake"
+    if current.agent_model_mode.lower() == "fake":
+        return "fake"
+    return "real"

@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
-import { getHealth } from "../lib/api";
-import type { HealthResponse } from "../types/api";
+import { getHealth, getHealthConfig } from "../lib/api";
+import type { HealthConfigResponse, HealthResponse } from "../types/api";
 
 type HealthState =
   | { status: "loading"; data: null; error: null }
-  | { status: "online"; data: HealthResponse; error: null }
+  | { status: "online"; data: HealthResponse; config: HealthConfigResponse | null; error: null }
   | { status: "offline"; data: null; error: string };
 
 export function useHealth() {
@@ -14,10 +14,10 @@ export function useHealth() {
   useEffect(() => {
     let isMounted = true;
 
-    getHealth()
-      .then((data) => {
+    Promise.all([getHealth(), getHealthConfig().catch(() => null)])
+      .then(([data, config]) => {
         if (isMounted) {
-          setState({ status: "online", data, error: null });
+          setState({ status: "online", data, config, error: null });
         }
       })
       .catch((error: unknown) => {

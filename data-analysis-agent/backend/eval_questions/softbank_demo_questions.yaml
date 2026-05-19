@@ -10,11 +10,13 @@ questions:
       - no_raw_type_attrs
       - mentions_24410
       - mentions_representative_fields
-  - id: tabular_preview
+  - id: tabular_preview_not_top_countries
     prompt: "Convert this dataset into a tabular preview if possible. Show the inferred columns and the first 5 rows."
     expects:
       - table_artifact
       - no_wrapper_columns
+      - preview_table_domain_columns
+      - table_not_top_countries
       - state_changed_false
   - id: schema
     prompt: "Summarize the schema of this patent metadata dataset. Which fields are scalar fields, which are dates, and which are list-like fields?"
@@ -31,22 +33,63 @@ questions:
       - table_counts_full_24410
       - not_cn19_ca1_only
       - state_changed_false
-  - id: filings_by_year_full_data
+  - id: filing_date_range_no_duplicate_tables
     prompt: "What is the filing date range of this portfolio? Also summarize the number of filings by year in a table."
     expects:
+      - no_step_budget
+      - max_execute_python_calls_2
       - table_artifact
+      - exactly_one_filings_by_year_table
+      - no_sample_filings_table
       - filing_years_full_data
+      - filing_date_range_in_answer
+      - table_not_top_countries
+      - no_duplicate_artifact_titles
       - state_changed_false
   - id: chart_render_contract
     prompt: "Create a bar chart showing the number of patent records by country."
     expects:
       - chart_artifact
       - chart_data_valid
-  - id: filings_chart
+  - id: line_or_bar_time_series_prefers_line
     prompt: "Create a line chart or bar chart showing filings by year based on filing_date."
     expects:
       - chart_artifact
       - chart_data_valid
+      - chart_type_line
+      - filings_chart_fields
+      - chart_title_not_fake
+  - id: line_chart_filings_by_year
+    prompt: "Create a line chart showing filings by year based on filing_date."
+    expects:
+      - chart_artifact
+      - chart_data_valid
+      - chart_type_line
+      - filings_chart_fields
+      - chart_title_not_fake
+  - id: pie_chart_no_result_nameerror
+    prompt: "create a pie chart for country"
+    expects:
+      - chart_artifact
+      - chart_data_valid
+      - chart_type_pie
+      - country_chart_fields
+      - no_result_nameerror
+  - id: conceptual_uses_semantic_verifier
+    prompt: "What's in this file?"
+    expects:
+      - mentions_patent_metadata
+      - mentions_record_meaning
+      - no_raw_dict_preview
+      - no_llm_skip_trace
+      - state_changed_false
+  - id: preview_metadata
+    prompt: "Convert this dataset into a tabular preview if possible. Show the inferred columns and the first 5 rows."
+    expects:
+      - table_artifact
+      - preview_row_count_5
+      - preview_source_total_24410
+      - state_changed_false
   - id: export_top5
     prompt: "Export that top-5 table as CSV, but do not change the working dataset."
     expects:
