@@ -1,52 +1,40 @@
 import { motion } from "framer-motion";
 import {
   Activity,
-  Bot,
-  CheckCircle2,
   Clock3,
   Database,
-  FileSearch,
   GitBranch,
   Layers3,
   Loader2,
   MessageSquareText,
   PanelRight,
   Plus,
-  Send,
   Sparkles,
   Upload,
 } from "lucide-react";
 
 import { Button } from "../components/Button";
+import { ArtifactCard } from "../components/ArtifactCard";
+import { ChatInput } from "../components/ChatInput";
+import { ChatThread } from "../components/ChatThread";
 import { CollapsibleCard } from "../components/CollapsibleCard";
 import { DatasetCard, formatPrimaryMetric } from "../components/DatasetCard";
 import { Panel } from "../components/Panel";
 import { ProfileInspector } from "../components/ProfileInspector";
 import { UploadDropzone } from "../components/UploadDropzone";
+import { useChat } from "../hooks/useChat";
 import { useHealth } from "../hooks/useHealth";
 import { useWorkspace } from "../hooks/useWorkspace";
-
-const traceItems = [
-  {
-    label: "Session bootstrapped",
-    detail: "A workspace session is created automatically when the app opens.",
-    tone: "teal",
-  },
-  {
-    label: "Dataset profiler ready",
-    detail: "Uploads are inspected generically without schema assumptions.",
-    tone: "indigo",
-  },
-  {
-    label: "Agent standby",
-    detail: "Streaming trace events will appear here in the next phase.",
-    tone: "rose",
-  },
-];
 
 export function Dashboard() {
   const health = useHealth();
   const workspace = useWorkspace();
+  const chat = useChat({
+    sessionId: workspace.session?.id,
+    activeDatasetId: workspace.activeDataset?.id,
+    branchName: branchName(workspace.session?.branches[0]?.name),
+    onStateChanged: workspace.refreshDatasets,
+  });
   const isOnline = health.status === "online";
   const branch = workspace.session?.branches[0] ?? null;
 
@@ -204,7 +192,7 @@ export function Dashboard() {
                     {branch?.name ?? "main"} branch
                   </div>
                   <div className="rounded-md border border-border bg-white/70 px-3 py-2">
-                    SSE queued
+                    {chat.isStreaming ? "Streaming" : "SSE ready"}
                   </div>
                 </div>
               </div>
@@ -227,71 +215,22 @@ export function Dashboard() {
                 </p>
               </motion.div>
 
-              {workspace.activeDataset ? (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="rounded-lg border border-slate-200 bg-white/76 p-4"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 text-sm font-bold">
-                        <FileSearch className="h-4 w-4 text-teal-700" />
-                        Profile loaded
-                      </div>
-                      <p className="mt-2 truncate text-sm text-muted-foreground">
-                        {workspace.activeDataset.object_type}
-                        {formatPrimaryMetric(
-                          workspace.activeDataset.profile.shape,
-                          workspace.activeDataset.profile.length,
-                        )
-                          ? ` · ${formatPrimaryMetric(
-                              workspace.activeDataset.profile.shape,
-                              workspace.activeDataset.profile.length,
-                            )}`
-                          : ""}
-                      </p>
-                    </div>
-                    <span className="rounded-full bg-slate-950 px-3 py-1 text-xs font-bold text-white">
-                      Dataset
-                    </span>
-                  </div>
-                </motion.div>
-              ) : null}
-
-              <div className="space-y-3">
-                {traceItems.map((item, index) => (
-                  <TraceEvent key={item.label} item={item} index={index} />
-                ))}
-              </div>
-
-              <div className="rounded-lg border-2 border-teal-600 bg-white p-5 shadow-lg shadow-teal-900/10">
-                <div className="flex items-center gap-2 text-sm font-bold text-teal-800">
-                  <CheckCircle2 className="h-4 w-4" />
-                  Final answer
-                </div>
-                <p className="mt-2 text-sm leading-6 text-slate-700">
-                  Agent conclusions, charts, and export links will render here separately from trace
-                  events. For now, the uploaded object profile is available in the inspector.
-                </p>
-              </div>
+              <ChatThread
+                sessionId={workspace.session?.id}
+                messages={chat.messages}
+                pendingConfirmation={chat.pendingConfirmation}
+                onConfirm={chat.confirmPending}
+                onCancel={chat.cancelPending}
+              />
             </div>
 
             <div className="border-t border-border/80 bg-white/60 p-4">
-              <div className="flex items-end gap-3 rounded-lg border border-border bg-white p-3 shadow-sm">
-                <textarea
-                  className="min-h-16 flex-1 resize-none border-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-                  placeholder={
-                    workspace.activeDataset
-                      ? "Ask the agent about this dataset in the next phase..."
-                      : "Upload a dataset to start the analysis workspace..."
-                  }
-                  disabled
-                />
-                <Button className="h-11 w-11 px-0" aria-label="Send message" disabled>
-                  <Send className="h-4 w-4" />
-                </Button>
-              </div>
+              <ChatInput
+                disabled={!workspace.session || !workspace.activeDataset}
+                streaming={chat.isStreaming}
+                onSend={(message) => void chat.sendMessage(message)}
+                onStop={chat.stop}
+              />
             </div>
           </Panel>
 
@@ -322,13 +261,27 @@ export function Dashboard() {
 
               <CollapsibleCard
                 title="Artifacts"
-                eyebrow="Coming next"
+                eyebrow={`${chat.artifacts.length} generated`}
                 icon={<PanelRight className="h-4 w-4" />}
-                defaultOpen={false}
+                defaultOpen={chat.artifacts.length > 0}
               >
-                <div className="rounded-lg border border-dashed border-slate-300 bg-white/70 p-4 text-sm text-muted-foreground">
-                  Charts, exported CSVs, generated figures, and branch snapshots will appear here.
-                </div>
+                {chat.artifacts.length > 0 && workspace.session ? (
+                  <div className="space-y-3">
+                    {chat.artifacts.map((artifact) =>
+                      workspace.session ? (
+                        <ArtifactCard
+                          key={artifact.id}
+                          sessionId={workspace.session.id}
+                          artifact={artifact}
+                        />
+                      ) : null,
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-dashed border-slate-300 bg-white/70 p-4 text-sm text-muted-foreground">
+                    Tables, charts, and CSV exports created by the agent will appear here.
+                  </div>
+                )}
               </CollapsibleCard>
             </div>
           </Panel>
@@ -360,37 +313,6 @@ function MiniMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TraceEvent({
-  item,
-  index,
-}: {
-  item: { label: string; detail: string; tone: string };
-  index: number;
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0, x: -10 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay: 0.08 * index, duration: 0.35 }}
-      className="flex items-start gap-3 rounded-lg border border-border bg-white/68 p-4"
-    >
-      <span
-        className={`mt-1 h-2.5 w-2.5 rounded-full ${
-          item.tone === "teal"
-            ? "bg-teal-500"
-            : item.tone === "indigo"
-              ? "bg-indigo-500"
-              : "bg-rose-500"
-        }`}
-      />
-      <div>
-        <p className="text-sm font-semibold">{item.label}</p>
-        <p className="mt-1 text-sm text-muted-foreground">{item.detail}</p>
-      </div>
-    </motion.div>
-  );
-}
-
 function EmptyDatasets() {
   return (
     <div className="rounded-lg border border-dashed border-slate-300 bg-white/64 p-5 text-center">
@@ -403,6 +325,10 @@ function EmptyDatasets() {
       </p>
     </div>
   );
+}
+
+function branchName(value?: string) {
+  return value ?? "main";
 }
 
 function TimelineEmpty() {

@@ -1,7 +1,10 @@
 import type {
   AnalysisSession,
+  ChatStreamEvent,
+  ChatStreamRequest,
   DatasetListResponse,
   DatasetUploadResponse,
+  ExecutionArtifact,
   HealthResponse,
 } from "../types/api";
 
@@ -66,6 +69,68 @@ export function uploadDatasets(
   });
 }
 
+export async function streamChat(
+  sessionId: string,
+  payload: ChatStreamRequest,
+  onEvent: (event: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(readErrorMessage(await response.text(), response.status));
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() ?? "";
+    blocks.forEach((block) => parseSseBlock(block, onEvent));
+  }
+
+  if (buffer.trim()) {
+    parseSseBlock(buffer, onEvent);
+  }
+}
+
+export async function getArtifactContent(
+  sessionId: string,
+  artifact: ExecutionArtifact,
+): Promise<unknown> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/sessions/${sessionId}/artifacts/${artifact.id}/content`,
+  );
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(await response.text(), response.status));
+  }
+
+  const text = await response.text();
+  if (artifact.kind === "csv") {
+    return text;
+  }
+
+  return JSON.parse(text);
+}
+
+export function artifactDownloadUrl(sessionId: string, artifactId: string): string {
+  return `${API_BASE_URL}/api/sessions/${sessionId}/artifacts/${artifactId}/download`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
 
@@ -87,4 +152,18 @@ function readErrorMessage(payload: string, status: number): string {
   }
 
   return `Request failed with status ${status}`;
+}
+
+function parseSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void) {
+  const dataLines = block
+    .split("\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => line.slice(6));
+
+  if (dataLines.length === 0) {
+    return;
+  }
+
+  const parsed = JSON.parse(dataLines.join("\n")) as ChatStreamEvent;
+  onEvent(parsed);
 }

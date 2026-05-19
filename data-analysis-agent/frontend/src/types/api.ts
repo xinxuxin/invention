@@ -66,3 +66,56 @@ export type DatasetListResponse = {
 export type DatasetUploadResponse = {
   datasets: Dataset[];
 };
+
+export type ChatHistoryMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type ExecutionArtifact = {
+  id: string;
+  name: string;
+  kind: "table" | "chart" | "csv" | string;
+  path: string;
+  metadata: Record<string, unknown>;
+};
+
+export type UpdatedDataset = {
+  dataset_id: string;
+  key: string;
+  version_id: string;
+  profile: ObjectProfile;
+  mutation_summary: string;
+};
+
+export type ChatStreamEvent =
+  | { type: "message_started" }
+  | { type: "trace"; message: string }
+  | { type: "code_started"; code: string }
+  | {
+      type: "code_result_summary";
+      ok: boolean;
+      stdout?: string;
+      stderr?: string;
+      traceback?: string | null;
+      result_preview?: unknown;
+      updated_datasets?: UpdatedDataset[];
+    }
+  | {
+      type: "confirmation_required";
+      message: string;
+      code?: string | null;
+      mutation_summary?: string | null;
+    }
+  | { type: "artifact_created"; artifact: ExecutionArtifact }
+  | { type: "final_answer"; answer: string; state_changed?: boolean }
+  | { type: "message_done" }
+  | { type: "error"; message: string };
+
+export type ChatStreamRequest = {
+  message: string;
+  active_dataset_id?: string | null;
+  branch_name?: string;
+  conversation_history?: ChatHistoryMessage[];
+  confirmed?: boolean;
+};

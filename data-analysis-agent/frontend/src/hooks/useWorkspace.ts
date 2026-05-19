@@ -112,6 +112,16 @@ export function useWorkspace() {
     [activeDatasetId, session],
   );
 
+  const refreshDatasets = useCallback(async () => {
+    if (!session) {
+      return;
+    }
+
+    const response = await listDatasets(session.id);
+    setDatasets(response.datasets);
+    setActiveDatasetId((current) => current ?? response.datasets[0]?.id ?? null);
+  }, [session]);
+
   return {
     session,
     sessionStatus,
@@ -122,6 +132,7 @@ export function useWorkspace() {
     setActiveDatasetId,
     upload,
     uploadFiles,
+    refreshDatasets,
   };
 }
 

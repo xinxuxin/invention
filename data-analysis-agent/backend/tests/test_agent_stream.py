@@ -192,6 +192,14 @@ def test_artifact_created_event_streams_separately(client: TestClient) -> None:
     assert artifacts[0]["artifact"]["kind"] == "csv"
     assert Path(artifacts[0]["artifact"]["path"]).exists()
 
+    artifact_id = artifacts[0]["artifact"]["id"]
+    content_response = client.get(f"/api/sessions/{session_id}/artifacts/{artifact_id}/content")
+    download_response = client.get(f"/api/sessions/{session_id}/artifacts/{artifact_id}/download")
+
+    assert content_response.status_code == 200
+    assert "value,group" in content_response.text
+    assert download_response.status_code == 200
+
 
 def _tool_response(name: str, arguments: dict) -> AgentModelResponse:
     call_id = f"call-{name}-{new_id()}"

@@ -46,3 +46,8 @@
 - Verified backend tests pass: `21 passed`.
 - Verified backend lint passes: `ruff check app tests`.
 - Verified frontend build still passes: `npm run build`.
+- Started frontend chat experience phase.
+- Added artifact content and download endpoints so frontend can render table/chart artifacts and provide CSV downloads.
+- Added POST-SSE frontend chat client, chat state hook, user/assistant message rendering, collapsible trace events, code summaries, prominent final answer cards, confirmation card flow, and inline artifact cards for tables/charts/CSVs.
+- Wired dashboard chat input with Cmd/Ctrl+Enter shortcut, stop button, live trace loading state, active dataset context, mutation refresh, and artifact sidebar.
+- Browser smoke-tested chat send flow: user message renders, public traces stream, and missing `OPENAI_API_KEY` appears as an inline error instead of spinner-only behavior.

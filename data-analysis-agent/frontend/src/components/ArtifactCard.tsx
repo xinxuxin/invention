@@ -1,0 +1,194 @@
+import { useEffect, useMemo, useState } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { Download, FileJson2, Table2 } from "lucide-react";
+
+import { artifactDownloadUrl, getArtifactContent } from "../lib/api";
+import type { ExecutionArtifact } from "../types/api";
+
+type ArtifactCardProps = {
+  sessionId: string;
+  artifact: ExecutionArtifact;
+};
+
+export function ArtifactCard({ sessionId, artifact }: ArtifactCardProps) {
+  const [content, setContent] = useState<unknown>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    getArtifactContent(sessionId, artifact)
+      .then((value) => {
+        if (mounted) {
+          setContent(value);
+        }
+      })
+      .catch((err: unknown) => {
+        if (mounted) {
+          setError(err instanceof Error ? err.message : "Unable to load artifact");
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [artifact, sessionId]);
+
+  return (
+    <section className="rounded-lg border border-border bg-white/78 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-bold">
+            {artifact.kind === "csv" ? (
+              <Download className="h-4 w-4 text-teal-700" />
+            ) : artifact.kind === "table" ? (
+              <Table2 className="h-4 w-4 text-indigo-700" />
+            ) : (
+              <FileJson2 className="h-4 w-4 text-rose-700" />
+            )}
+            <span className="truncate">{artifact.name}</span>
+          </div>
+          <p className="mt-1 text-xs uppercase tracking-wide text-muted-foreground">{artifact.kind}</p>
+        </div>
+        {artifact.kind === "csv" ? (
+          <a
+            className="rounded-md border border-border bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50"
+            href={artifactDownloadUrl(sessionId, artifact.id)}
+          >
+            Download
+          </a>
+        ) : null}
+      </div>
+
+      <div className="mt-4">
+        {error ? (
+          <p className="rounded-md bg-rose-50 p-3 text-xs font-semibold text-rose-700">{error}</p>
+        ) : artifact.kind === "csv" ? (
+          <CsvPreview content={typeof content === "string" ? content : ""} />
+        ) : artifact.kind === "table" ? (
+          <MiniTable rows={Array.isArray(content) ? content : []} />
+        ) : artifact.kind === "chart" ? (
+          <ChartPreview spec={content} />
+        ) : (
+          <pre className="max-h-52 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">
+            {JSON.stringify(content, null, 2)}
+          </pre>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function MiniTable({ rows }: { rows: unknown[] }) {
+  const normalized = rows.filter(isRecord).slice(0, 8);
+  const columns = useMemo(
+    () => Array.from(new Set(normalized.flatMap((row) => Object.keys(row)))).slice(0, 8),
+    [normalized],
+  );
+
+  if (normalized.length === 0) {
+    return <p className="text-sm text-muted-foreground">Table artifact is loading...</p>;
+  }
+
+  return (
+    <div className="max-h-64 overflow-auto rounded-md border border-border bg-white">
+      <table className="w-full min-w-[320px] text-left text-xs">
+        <thead className="sticky top-0 bg-slate-100">
+          <tr>
+            {columns.map((column) => (
+              <th key={column} className="border-b border-border px-3 py-2 font-bold">
+                {column}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {normalized.map((row, index) => (
+            <tr key={index} className="odd:bg-white even:bg-slate-50">
+              {columns.map((column) => (
+                <td key={column} className="border-b border-border/70 px-3 py-2">
+                  {formatCell(row[column])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CsvPreview({ content }: { content: string }) {
+  if (!content) {
+    return <p className="text-sm text-muted-foreground">CSV artifact is loading...</p>;
+  }
+
+  return (
+    <pre className="max-h-44 overflow-auto whitespace-pre rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-100">
+      {content.split("\n").slice(0, 8).join("\n")}
+    </pre>
+  );
+}
+
+function ChartPreview({ spec }: { spec: unknown }) {
+  const rows = isRecord(spec) && Array.isArray(spec.data) ? spec.data.filter(isRecord) : [];
+  const keys = rows.length ? Object.keys(rows[0]) : [];
+  const xKey = keys.find((key) => typeof rows[0][key] === "string") ?? keys[0];
+  const yKey = keys.find((key) => typeof rows[0][key] === "number") ?? keys[1];
+  const mark = isRecord(spec) && typeof spec.mark === "string" ? spec.mark : "bar";
+
+  if (!rows.length || !xKey || !yKey) {
+    return (
+      <pre className="max-h-52 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">
+        {JSON.stringify(spec, null, 2)}
+      </pre>
+    );
+  }
+
+  return (
+    <div className="h-56 rounded-md border border-border bg-white p-3">
+      <ResponsiveContainer width="100%" height="100%">
+        {mark === "line" ? (
+          <LineChart data={rows}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey={xKey} />
+            <YAxis />
+            <Tooltip />
+            <Line type="monotone" dataKey={yKey} stroke="#0f766e" strokeWidth={2} />
+          </LineChart>
+        ) : (
+          <BarChart data={rows}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey={xKey} />
+            <YAxis />
+            <Tooltip />
+            <Bar dataKey={yKey} fill="#0f766e" radius={[4, 4, 0, 0]} />
+          </BarChart>
+        )}
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function formatCell(value: unknown) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
