@@ -158,7 +158,7 @@ def test_fake_agent_chart_artifact_creation(client: TestClient) -> None:
     assert artifact["kind"] == "chart"
     assert artifact["metadata"]["chart_type"] == "bar"
     assert content["title"] == "Fake agent chart"
-    assert content["data"]
+    assert content["chart_spec"]["data"]
 
 
 def test_fake_agent_multi_dataset_comparison(client: TestClient) -> None:

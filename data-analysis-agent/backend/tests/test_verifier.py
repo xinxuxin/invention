@@ -171,7 +171,7 @@ def test_llm_verifier_timeout_falls_back() -> None:
     )
 
     assert llm is None
-    assert "deterministic verifier" in trace
+    assert trace == "Verifier completed using deterministic checks."
 
 
 def test_llm_verifier_invalid_json_falls_back() -> None:
@@ -193,7 +193,60 @@ def test_llm_verifier_invalid_json_falls_back() -> None:
     )
 
     assert llm is None
-    assert "deterministic verifier" in trace
+    assert trace == "Verifier completed using deterministic checks."
+    assert "JSONDecodeError" not in trace
+
+
+def test_llm_verifier_debug_trace_can_include_exception_type() -> None:
+    settings = Settings(
+        openai_api_key="test",
+        llm_verifier_enabled=True,
+        verifier_mode="hybrid",
+        show_verifier_debug_trace=True,
+    )
+    deterministic = ResultVerifier().verify(
+        user_message="What is this?",
+        execution_result=_execution(result_preview={"ok": True}),
+    )
+    llm, trace = LLMVerifier(settings=settings, client=_InvalidJsonClient()).verify_if_allowed(
+        user_message="What is this?",
+        context={},
+        execution_result=_execution(result_preview={"ok": True}),
+        artifacts=[],
+        state_changed=False,
+        latest_code=None,
+        deterministic_result=deterministic,
+        current_step=1,
+        turn_started_at=time.monotonic(),
+    )
+
+    assert llm is None
+    assert "JSONDecodeError" in trace
+
+
+def test_llm_verifier_missing_fields_get_defaults() -> None:
+    settings = Settings(openai_api_key="test", llm_verifier_enabled=True, verifier_mode="hybrid")
+    deterministic = ResultVerifier().verify(
+        user_message="What is this?",
+        execution_result=_execution(result_preview={"ok": True}),
+    )
+    llm, trace = LLMVerifier(settings=settings, client=_PartialJsonClient()).verify_if_allowed(
+        user_message="What is this?",
+        context={},
+        execution_result=_execution(result_preview={"ok": True}),
+        artifacts=[],
+        state_changed=False,
+        latest_code=None,
+        deterministic_result=deterministic,
+        current_step=1,
+        turn_started_at=time.monotonic(),
+    )
+
+    assert trace is None
+    assert llm is not None
+    assert llm.passed is True
+    assert llm.confidence == 0.0
+    assert llm.hallucination_risk == "medium"
 
 
 def test_deterministic_hard_fail_wins_over_llm_pass() -> None:
@@ -304,5 +357,17 @@ class _InvalidJsonClient:
     def create(self, **_: object) -> object:
         class Response:
             output_text = "not json"
+
+        return Response()
+
+
+class _PartialJsonClient:
+    @property
+    def responses(self) -> "_PartialJsonClient":
+        return self
+
+    def create(self, **_: object) -> object:
+        class Response:
+            output_text = "```json\n{\"passed\": true}\n```"
 
         return Response()

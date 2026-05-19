@@ -96,7 +96,7 @@ def test_streams_trace_python_result_and_final_answer(client: TestClient) -> Non
     assert any(event["type"] == "code_started" for event in events)
     assert any(event["type"] == "code_result_summary" and event["ok"] for event in events)
     assert events[-2]["type"] == "final_answer"
-    assert "Result preview" in events[-2]["answer"]
+    assert "table shown in the chat below" in events[-2]["answer"]
     assert fake.calls == 1
     assert events[-1]["type"] == "message_done"
 
@@ -169,7 +169,6 @@ def test_agent_summarizes_latest_execution_after_step_limit(client: TestClient) 
     assert len([event for event in events if event["type"] == "code_result_summary"]) == 1
     assert events[-2]["type"] == "final_answer"
     assert "step budget" not in events[-2]["answer"].lower()
-    assert "useful step" in events[-2]["answer"]
     assert not any(event["type"] == "error" and "step limit" in event["message"] for event in events)
 
 
@@ -197,6 +196,13 @@ def test_destructive_mutation_requires_confirmation(client: TestClient) -> None:
     confirmation = next(event for event in events if event["type"] == "confirmation_required")
 
     assert confirmation["confirmation_id"]
+    assert confirmation["title"] == "Confirm dataset mutation"
+    assert confirmation["operation_summary"] == "Drop value column"
+    assert confirmation["dataset_name"] == "agent_frame"
+    assert confirmation["expected_effect"]
+    assert confirmation["state_impact"]
+    assert confirmation["reversible"] is True
+    assert confirmation["proposed_code"] == "data.drop(columns=['value'], inplace=True)"
     assert confirmation["risk_level"] == "high"
     assert confirmation["affected_dataset_ids"] == [dataset_id]
     assert not any(event["type"] == "code_result_summary" for event in events)
@@ -430,9 +436,10 @@ def test_chart_artifact_streams_with_valid_spec(client: TestClient) -> None:
     assert response.status_code == 200
     assert chart["kind"] == "chart"
     assert chart["metadata"]["chart_type"] == "bar"
+    assert chart["chart_spec"]["data"]
     assert content["title"] == "Group totals"
-    assert content["x"] == "group"
-    assert content["y"] == "value"
+    assert content["chart_spec"]["x"] == "group"
+    assert content["chart_spec"]["y"] == "value"
 
 
 def test_agent_context_and_executor_include_multiple_datasets(client: TestClient) -> None:
@@ -687,8 +694,96 @@ def test_agent_stops_after_useful_inspection_result(client: TestClient) -> None:
         for event in events
     )
     assert events[-2]["type"] == "final_answer"
-    assert "sample_examples" in events[-2]["answer"]
+    assert "{'object_type':" not in events[-2]["answer"]
+    assert "Representative fields" in events[-2]["answer"]
     assert not any(event["type"] == "error" for event in events)
+
+
+def test_ambiguous_destructive_prompt_asks_clarification_without_python(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient([_tool_response("execute_python", {"code": "raise RuntimeError('should not run')"})])
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Remove bad records.", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    final = events[-2]
+
+    assert response.status_code == 200
+    assert fake.calls == 0
+    assert any(
+        event["type"] == "trace" and "Clarification needed" in event.get("message", "")
+        for event in events
+    )
+    assert not any(event["type"] == "code_started" for event in events)
+    assert final["type"] == "final_answer"
+    assert "Please choose the rule" in final["answer"]
+    assert final["state_changed"] is False
+
+
+def test_clean_dataset_prompt_asks_clarification_without_python(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient([_tool_response("execute_python", {"code": "raise RuntimeError('should not run')"})])
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Clean this dataset.", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    assert response.status_code == 200
+    assert fake.calls == 0
+    assert not any(event["type"] == "code_result_summary" for event in events)
+    assert "missing title" in events[-2]["answer"].lower()
+
+
+def test_specific_destructive_prompt_can_proceed_to_confirmation(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "data = data[data['group'].notna()].copy()",
+                    "mutates_state": True,
+                    "mutation_summary": "Remove records with missing group values",
+                },
+            )
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Remove records with missing titles", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    assert response.status_code == 200
+    assert fake.calls == 1
+    assert any(event["type"] == "confirmation_required" for event in events)
+
+
+def test_mutation_history_shortcut_does_not_call_python(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient([_tool_response("execute_python", {"code": "history"})])
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Show me the mutation history so far.", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    answer = events[-2]["answer"]
+
+    assert response.status_code == 200
+    assert fake.calls == 0
+    assert "Current branch" in answer
+    assert "NameError" not in answer
+    assert events[-2]["state_changed"] is False
 
 
 def _tool_response(name: str, arguments: dict) -> AgentModelResponse:

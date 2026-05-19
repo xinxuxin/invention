@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from collections.abc import Mapping
 from typing import Any
@@ -81,10 +82,10 @@ def _markdown_answer(
     artifact_sentence = _artifact_sentence(artifacts)
     if artifact_sentence:
         lines.append(artifact_sentence)
-    elif execution_result and execution_result.stdout.strip():
-        lines.append(f"I inspected the data records and captured this output: {_compact(execution_result.stdout.strip(), 500)}")
     elif execution_result and execution_result.result_preview is not None:
         lines.append(_summary_from_preview(execution_result.result_preview))
+    elif execution_result and execution_result.stdout.strip():
+        lines.append(_summary_from_stdout(execution_result.stdout))
     else:
         lines.append("I completed the analysis with the available session context.")
 
@@ -93,7 +94,8 @@ def _markdown_answer(
         lines.extend(f"- {finding}" for finding in key_findings[:5])
 
     if mutation_summary:
-        lines.extend(["", f"Mutation: {mutation_summary}"])
+        label = "Mutation" if state_changed else "Analysis performed"
+        lines.extend(["", f"{label}: {mutation_summary}"])
 
     if warnings:
         lines.extend(["", "### Notes"])
@@ -171,6 +173,12 @@ def _findings_from_preview(preview: Any) -> list[str]:
             if isinstance(columns, list) and columns:
                 findings.append(f"Columns include {', '.join(str(column) for column in columns[:8])}.")
             return findings
+        structural = _structural_findings(preview)
+        if structural:
+            return structural
+        schema_findings = _schema_findings(preview)
+        if schema_findings:
+            return schema_findings
         simple = []
         for key, value in list(preview.items())[:5]:
             if isinstance(value, (str, int, float, bool)) or value is None:
@@ -189,7 +197,11 @@ def _summary_from_preview(preview: Any) -> str:
             shape = preview.get("shape")
             if isinstance(shape, list) and len(shape) >= 2:
                 return f"I inspected the data and found a DataFrame preview with {shape[0]} rows and {shape[1]} columns."
-        return f"I inspected the data and extracted a structured record preview: {_compact(str(dict(list(preview.items())[:5])), 500)}"
+        if _structural_findings(preview):
+            return "I inspected the data and summarized the object type, size, and representative fields."
+        if _schema_findings(preview):
+            return "I inspected the data and grouped the inferred fields by their observed value types."
+        return "I inspected the data and extracted a structured preview."
     if isinstance(preview, list):
         return f"I inspected the data and extracted {len(preview)} preview record{'s' if len(preview) != 1 else ''}."
     return _compact(str(preview), 500)
@@ -200,7 +212,8 @@ def _highlights(
     artifacts: list[ExecutionArtifact],
     state_changed: bool,
 ) -> list[dict[str, Any]]:
-    highlights: list[dict[str, Any]] = [{"label": "State changed", "value": "Yes" if state_changed else "No"}]
+    del state_changed
+    highlights: list[dict[str, Any]] = []
     for artifact in artifacts[:4]:
         if artifact.kind == "table":
             highlights.append({"label": "Table", "value": artifact.metadata.get("row_count") or artifact.metadata.get("rows") or "created"})
@@ -233,7 +246,156 @@ def _compact(value: str, limit: int) -> str:
     cleaned = value.strip()
     if len(cleaned) <= limit:
         return cleaned
-    return f"{cleaned[:limit].rstrip()}\n... truncated ..."
+    return f"{cleaned[:limit].rstrip()}\n..."
+
+
+def _summary_from_stdout(stdout: str) -> str:
+    parsed = _parse_structured_text(stdout)
+    if parsed is not None:
+        return _summary_from_preview(parsed)
+    return f"I inspected the data and captured concise output: {_compact(stdout.strip(), 300)}"
+
+
+def _parse_structured_text(value: str) -> Any | None:
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+    try:
+        return json.loads(stripped)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(stripped)
+    except Exception:
+        return None
+
+
+def _structural_findings(preview: Mapping[str, Any]) -> list[str]:
+    findings: list[str] = []
+    object_type = preview.get("object_type") or preview.get("type")
+    if object_type and object_type != "dataframe":
+        findings.append(f"Object type: {object_type}.")
+
+    length = (
+        preview.get("length")
+        or preview.get("object_length")
+        or preview.get("records")
+        or preview.get("row_count")
+        or preview.get("approximate_size")
+    )
+    if isinstance(length, (int, float)) and not isinstance(length, bool):
+        findings.append(f"Records/items observed: {int(length):,}.")
+
+    fields = _representative_fields(preview)
+    if fields:
+        findings.append(f"Representative fields include {', '.join(fields[:10])}.")
+
+    return findings
+
+
+def _representative_fields(preview: Mapping[str, Any]) -> list[str]:
+    candidates = (
+        preview.get("sample_records")
+        or preview.get("sample_examples")
+        or preview.get("examples_clean")
+        or preview.get("examples")
+        or preview.get("rows")
+        or preview.get("sample")
+    )
+    if isinstance(candidates, Mapping):
+        return [str(key) for key in candidates.keys() if not str(key).startswith("__")]
+    if isinstance(candidates, list):
+        for item in candidates:
+            if isinstance(item, Mapping):
+                return [str(key) for key in item.keys() if not str(key).startswith("__")]
+    columns = preview.get("columns")
+    if isinstance(columns, list):
+        return [str(column.get("key") if isinstance(column, Mapping) else column) for column in columns]
+    keys = preview.get("keys")
+    if isinstance(keys, list):
+        return [str(key) for key in keys]
+    return []
+
+
+def _schema_findings(preview: Mapping[str, Any]) -> list[str]:
+    grouped = _schema_groups(preview)
+    if not grouped:
+        return []
+
+    findings: list[str] = []
+    labels = [
+        ("scalar", "Scalar fields"),
+        ("date", "Date-like fields"),
+        ("list", "List-like fields"),
+        ("numeric", "Numeric fields"),
+        ("boolean", "Boolean fields"),
+        ("nullable", "Nullable fields"),
+    ]
+    for key, label in labels:
+        fields = grouped.get(key, [])
+        if fields:
+            findings.append(f"{label}: {', '.join(fields[:12])}.")
+    return findings
+
+
+def _schema_groups(preview: Mapping[str, Any]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {
+        "scalar": [],
+        "date": [],
+        "list": [],
+        "numeric": [],
+        "boolean": [],
+        "nullable": [],
+    }
+
+    explicit_map = {
+        "scalar_fields": "scalar",
+        "date_fields": "date",
+        "date_like_fields": "date",
+        "list_fields": "list",
+        "list_like_fields": "list",
+        "numeric_fields": "numeric",
+        "boolean_fields": "boolean",
+        "nullable_fields": "nullable",
+    }
+    for source, target in explicit_map.items():
+        value = preview.get(source)
+        if isinstance(value, list):
+            grouped[target].extend(str(item) for item in value)
+
+    for key, value in preview.items():
+        if key in {
+            "object_type",
+            "type",
+            "length",
+            "object_length",
+            "records",
+            "row_count",
+            "approximate_size",
+            "sample_examples",
+            "sample_records",
+            "examples",
+            "examples_clean",
+            "rows",
+            "sample",
+            "columns",
+            "keys",
+        }:
+            continue
+        if isinstance(value, str):
+            lowered = value.lower()
+            if "list" in lowered:
+                grouped["list"].append(str(key))
+            elif "date" in lowered or "datetime" in lowered:
+                grouped["date"].append(str(key))
+            elif "numeric" in lowered or lowered in {"int", "float", "integer", "number"}:
+                grouped["numeric"].append(str(key))
+            elif "bool" in lowered:
+                grouped["boolean"].append(str(key))
+            elif "scalar" in lowered or lowered in {"str", "string"}:
+                grouped["scalar"].append(str(key))
+
+    return {key: _dedupe(values) for key, values in grouped.items() if values}
 
 
 def _dedupe(values: list[str]) -> list[str]:

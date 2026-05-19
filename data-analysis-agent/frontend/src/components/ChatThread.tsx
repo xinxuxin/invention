@@ -469,15 +469,22 @@ function ConfirmationCard({
           <AlertTriangle className="h-5 w-5" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-bold text-amber-950">Confirmation required</p>
+          <p className="text-sm font-bold text-amber-950">
+            {pending.title || "Confirmation required"}
+          </p>
           <span className="mt-2 inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-emerald-800">
             <ShieldCheck className="h-3 w-3" />
             Safe mode
           </span>
-          <p className="mt-2 text-sm leading-6 text-amber-950/80">{pending.message}</p>
+          <p className="mt-2 text-sm leading-6 text-amber-950/80">
+            {pending.operationSummary || pending.message}
+          </p>
+          {pending.expectedEffect ? (
+            <p className="mt-2 text-sm leading-6 text-amber-950/80">{pending.expectedEffect}</p>
+          ) : null}
           <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
             <RiskMetric label="Risk level" value={formatRisk(pending.riskLevel)} />
-            <RiskMetric label="Operation" value={pending.operationSummary ?? pending.mutationSummary ?? "Mutation"} />
+            <RiskMetric label="Dataset" value={pending.datasetName ?? "Current dataset"} />
             <RiskMetric
               label="Affected data"
               value={
@@ -487,15 +494,30 @@ function ConfirmationCard({
               }
             />
           </div>
+          <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+            <RiskMetric label="State impact" value={pending.stateImpact ?? "Creates a new version if applied"} />
+            <RiskMetric
+              label="Reversibility"
+              value={pending.reversible === false ? "Not automatically reversible" : "Rollback available"}
+            />
+          </div>
+          {pending.rollbackNote ? (
+            <p className="mt-3 rounded-md border border-amber-200 bg-white/60 p-3 text-xs leading-5 text-amber-950/75">
+              {pending.rollbackNote}
+            </p>
+          ) : null}
           {pending.code ? (
-            <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 text-xs text-slate-100">
-              {pending.code}
-            </pre>
+            <details className="mt-3 rounded-md border border-amber-200 bg-white/70 p-3">
+              <summary className="cursor-pointer text-xs font-bold text-amber-950">Show code</summary>
+              <pre className="mt-3 max-h-36 overflow-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 text-xs text-slate-100">
+                {pending.code}
+              </pre>
+            </details>
           ) : null}
           <div className="mt-4 flex gap-2">
-            <Button onClick={onConfirm}>Apply change</Button>
+            <Button onClick={onConfirm}>{pending.confirmLabel || "Apply change"}</Button>
             <Button variant="secondary" onClick={onCancel}>
-              Cancel
+              {pending.cancelLabel || "Cancel"}
             </Button>
           </div>
         </div>

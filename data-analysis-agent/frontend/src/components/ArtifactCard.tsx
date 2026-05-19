@@ -108,7 +108,15 @@ export function ArtifactCard({ sessionId, artifact }: ArtifactCardProps) {
         ) : artifact.kind === "table" ? (
           <TableArtifact artifact={artifact} content={content} />
         ) : artifact.kind === "chart" ? (
-          <ChartPreview spec={content} fallback={artifact.chart_spec ?? artifact.metadata.chart_spec} />
+          <ChartPreview
+            spec={content}
+            fallback={
+              artifact.chart_spec ??
+              artifact.payload?.chart_spec ??
+              artifact.metadata.chart_spec ??
+              artifact.metadata.payload
+            }
+          />
         ) : (
           <JsonPreview content={content} />
         )}
@@ -305,7 +313,7 @@ function ChartPreview({ spec, fallback }: { spec: unknown; fallback?: unknown })
   const chart = parseChartSpec(spec) ?? parseChartSpec(fallback);
 
   if (!chart) {
-    return <JsonPreview content={spec} />;
+    return <ChartError spec={spec ?? fallback} />;
   }
 
   return (
@@ -331,6 +339,23 @@ function ChartPreview({ spec, fallback }: { spec: unknown; fallback?: unknown })
         </ResponsiveContainer>
       </div>
       <DataTable rows={chart.data.slice(0, 8)} />
+    </div>
+  );
+}
+
+function ChartError({ spec }: { spec: unknown }) {
+  return (
+    <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+      <p className="font-bold">Chart could not be rendered.</p>
+      <p className="mt-1 text-xs leading-5">
+        The chart artifact is missing usable data, x/y fields, or a supported chart type.
+      </p>
+      <details className="mt-3">
+        <summary className="cursor-pointer text-xs font-bold">Show chart payload</summary>
+        <pre className="mt-2 max-h-44 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">
+          {JSON.stringify(spec, null, 2)}
+        </pre>
+      </details>
     </div>
   );
 }
@@ -474,7 +499,8 @@ function normalizeTableContent(content: unknown, artifact: ExecutionArtifact): T
 }
 
 function parseChartSpec(spec: unknown): ChartSpec | null {
-  const raw = isRecord(spec) && isRecord(spec.chart_spec) ? spec.chart_spec : spec;
+  const first = isRecord(spec) && isRecord(spec.payload) ? spec.payload : spec;
+  const raw = isRecord(first) && isRecord(first.chart_spec) ? first.chart_spec : first;
   if (!isRecord(raw) || !Array.isArray(raw.data)) {
     return null;
   }
@@ -497,7 +523,7 @@ function parseChartSpec(spec: unknown): ChartSpec | null {
   const keys = Object.keys(data[0]);
   const x = typeof raw.x === "string" ? raw.x : keys[0];
   const y = typeof raw.y === "string" ? raw.y : keys.find((key) => key !== x) ?? keys[1];
-  if (!x || !y) {
+  if (!x || !y || !(x in data[0]) || !(y in data[0])) {
     return null;
   }
 

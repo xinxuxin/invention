@@ -656,9 +656,36 @@ def test_chart_artifact_validates_and_reduces_large_data(db_session: Session) ->
     assert artifact.metadata["chart_type"] == "bar"
     assert artifact.metadata["row_count"] == 50
     assert artifact.metadata["sampled"] is True
-    assert payload["chart_type"] == "bar"
-    assert len(payload["data"]) == 50
-    assert payload["_sampling"]["method"] == "aggregate_top_categories"
+    assert artifact.chart_spec is not None
+    assert artifact.chart_spec["data"]
+    assert payload["chart_spec"]["chart_type"] == "bar"
+    assert len(payload["chart_spec"]["data"]) == 50
+    assert payload["chart_spec"]["_sampling"]["method"] == "aggregate_top_categories"
+
+
+def test_save_chart_accepts_single_spec_argument(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "rows = [{'year': 2020, 'count': 2}, {'year': 2021, 'count': 4}]",
+                "save_chart({'title': 'Filings by year', 'chart_type': 'line', 'data': rows, 'x': 'year', 'y': 'count'})",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    artifact = next(item for item in result.artifacts if item.kind == "chart")
+    payload = json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert artifact.title == "Filings by year"
+    assert artifact.chart_spec is not None
+    assert artifact.chart_spec["data"][0] == {"year": 2020, "count": 2}
+    assert payload["chart_spec"]["x"] == "year"
 
 
 def test_invalid_chart_artifact_returns_traceback(db_session: Session) -> None:

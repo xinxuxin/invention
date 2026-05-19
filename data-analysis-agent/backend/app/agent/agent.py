@@ -197,6 +197,25 @@ class FakeAgentModelClient:
                 {"code": "preview(data['__definitely_missing_for_retry__'])", "mutates_state": False},
             )
 
+        if "missing title" in prompt or "missing titles" in prompt:
+            return _fake_tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "df = to_dataframe(data)",
+                            "if 'title' in df.columns:",
+                            "    data = df[df['title'].notna() & (df['title'].astype(str).str.strip() != '')].copy()",
+                            "else:",
+                            "    data = df.copy()",
+                            "preview({'rows_after': len(data), 'columns': list(data.columns)})",
+                        ]
+                    ),
+                    "mutates_state": True,
+                    "mutation_summary": "Remove records with missing title values",
+                },
+            )
+
         if any(term in prompt for term in ("visualize", "chart", "plot")):
             return _fake_tool_response(
                 "execute_python",
@@ -327,11 +346,12 @@ class CodingAgent:
 
         clarification = _clarification_for_ambiguous_destructive_request(request.message)
         if clarification:
+            yield {"type": "trace", "message": "Clarification needed before making a destructive data change."}
             yield {
                 "type": "final_answer",
                 "answer": clarification,
                 "state_changed": False,
-                "highlights": [{"label": "State changed", "value": "No"}],
+                "highlights": [],
                 "warnings": ["Clarification is required before a potentially destructive mutation."],
             }
             yield {"type": "message_done"}
@@ -437,16 +457,10 @@ class CodingAgent:
                                 input_items=input_items,
                                 tool_call_id=tool_call.id,
                             )
-                            yield {
-                                "type": "confirmation_required",
-                                "confirmation_id": confirmation.id,
-                                "message": "This request appears to mutate or remove data. Please confirm before I run it.",
-                                "code": code,
-                                "mutation_summary": confirmation.operation_summary,
-                                "operation_summary": confirmation.operation_summary,
-                                "risk_level": confirmation.risk_level,
-                                "affected_dataset_ids": confirmation.affected_dataset_ids,
-                            }
+                            yield self._confirmation_event(
+                                confirmation,
+                                message="This request appears to mutate or remove data. Please confirm before I run it.",
+                            )
                             yield {"type": "message_done"}
                             return
 
@@ -621,24 +635,29 @@ class CodingAgent:
                                 input_items=input_items,
                                 tool_call_id=tool_call.id,
                             )
-                        yield {
-                            "type": "confirmation_required",
-                            "confirmation_id": confirmation.id if confirmation else None,
-                            "message": str(arguments.get("message", "Please confirm this mutation.")),
-                            "code": code,
-                            "mutation_summary": (
-                                confirmation.operation_summary
-                                if confirmation
-                                else arguments.get("mutation_summary")
-                            ),
-                            "operation_summary": (
-                                confirmation.operation_summary
-                                if confirmation
-                                else arguments.get("mutation_summary")
-                            ),
-                            "risk_level": confirmation.risk_level if confirmation else "medium",
-                            "affected_dataset_ids": confirmation.affected_dataset_ids if confirmation else [],
-                        }
+                        if confirmation:
+                            yield self._confirmation_event(
+                                confirmation,
+                                message=str(arguments.get("message", "Please confirm this mutation.")),
+                            )
+                        else:
+                            yield {
+                                "type": "confirmation_required",
+                                "confirmation_id": None,
+                                "title": "Confirm dataset mutation",
+                                "message": str(arguments.get("message", "Please confirm this mutation.")),
+                                "code": code,
+                                "proposed_code": code,
+                                "mutation_summary": arguments.get("mutation_summary"),
+                                "operation_summary": arguments.get("mutation_summary"),
+                                "risk_level": "medium",
+                                "affected_dataset_ids": [],
+                                "state_impact": "This will create a new version if applied.",
+                                "reversible": True,
+                                "rollback_note": "You can rollback to the previous version from mutation history.",
+                                "confirm_label": "Apply change",
+                                "cancel_label": "Cancel",
+                            }
                         input_items.append(
                             {
                                 "type": "function_call_output",
@@ -793,6 +812,43 @@ class CodingAgent:
         self.db.refresh(confirmation)
         return confirmation
 
+    def _confirmation_event(
+        self,
+        confirmation: PendingConfirmation,
+        *,
+        message: str,
+    ) -> dict[str, Any]:
+        dataset_name = self._confirmation_dataset_name(confirmation)
+        summary = confirmation.operation_summary or "Apply the proposed dataset mutation."
+        return {
+            "type": "confirmation_required",
+            "confirmation_id": confirmation.id,
+            "title": "Confirm dataset mutation",
+            "message": message,
+            "code": confirmation.proposed_code,
+            "proposed_code": confirmation.proposed_code,
+            "mutation_summary": summary,
+            "operation_summary": summary,
+            "dataset_name": dataset_name,
+            "risk_level": confirmation.risk_level,
+            "expected_effect": _expected_effect(summary, dataset_name),
+            "state_impact": "This will create a new version on the current branch.",
+            "reversible": True,
+            "rollback_note": "You can rollback to the previous version from mutation history.",
+            "affected_dataset_ids": confirmation.affected_dataset_ids,
+            "confirm_label": "Apply change",
+            "cancel_label": "Cancel",
+        }
+
+    def _confirmation_dataset_name(self, confirmation: PendingConfirmation) -> str:
+        dataset_id = confirmation.active_dataset_id or (
+            confirmation.affected_dataset_ids[0] if confirmation.affected_dataset_ids else None
+        )
+        dataset = self.db.get(Dataset, dataset_id) if dataset_id else None
+        if dataset is None:
+            return "Current dataset"
+        return dataset.dataset_key or dataset.original_filename
+
     def _affected_dataset_ids(
         self,
         session_id: str,
@@ -946,6 +1002,10 @@ class CodingAgent:
                 "create a branch",
                 "compare this branch",
                 "what changed",
+                "mutation history",
+                "branch history",
+                "rollback history",
+                "current branch",
             )
         ):
             return None
@@ -961,6 +1021,9 @@ class CodingAgent:
 
         if "compare this branch" in message and "main" in message:
             return self._compare_branch_to_main(session_id, branch)
+
+        if any(phrase in message for phrase in ("mutation history", "branch history", "rollback history", "current branch")):
+            return self._describe_mutation_history(session_id, branch)
 
         if "what changed" in message:
             return self._describe_last_change(branch)
@@ -1038,16 +1101,10 @@ class CodingAgent:
                 self.db.commit()
                 self.db.refresh(confirmation)
                 return [
-                    {
-                        "type": "confirmation_required",
-                        "confirmation_id": confirmation.id,
-                        "message": "Rolling back changes the active dataset state. Please confirm before I restore this version.",
-                        "code": confirmation.proposed_code,
-                        "mutation_summary": confirmation.operation_summary,
-                        "operation_summary": confirmation.operation_summary,
-                        "risk_level": confirmation.risk_level,
-                        "affected_dataset_ids": confirmation.affected_dataset_ids,
-                    }
+                    self._confirmation_event(
+                        confirmation,
+                        message="Rolling back changes the active dataset state. Please confirm before I restore this version.",
+                    )
                 ]
             current = self.db.get(VersionNode, branch.current_version_id) if branch.current_version_id else None
             rollback = self._copy_version(
@@ -1128,6 +1185,39 @@ class CodingAgent:
             {"type": "final_answer", "answer": answer, "state_changed": False},
         ]
 
+    def _describe_mutation_history(self, session_id: str, branch: Branch) -> list[dict[str, Any]]:
+        versions = list(
+            self.db.exec(
+                select(VersionNode).where(VersionNode.branch_id == branch.id).order_by(VersionNode.created_at)
+            ).all()
+        )
+        if not versions:
+            answer = (
+                f"Current branch: `{branch.name}`.\n\n"
+                "There is no saved mutation history yet.\n\n"
+                "**State changed:** No"
+            )
+            return [
+                {"type": "trace", "message": "Reading branch mutation history..."},
+                {"type": "final_answer", "answer": answer, "state_changed": False},
+            ]
+
+        datasets = {
+            dataset.id: dataset
+            for dataset in self.db.exec(select(Dataset).where(Dataset.session_id == session_id)).all()
+        }
+        lines = [f"Current branch: `{branch.name}`.", "", "Mutation history:"]
+        for index, version in enumerate(versions[-12:], start=max(1, len(versions) - 11)):
+            dataset = datasets.get(version.dataset_id)
+            dataset_name = dataset.dataset_key or dataset.original_filename if dataset else version.dataset_id[:8]
+            summary = version.mutation_summary or version.label or "Version saved"
+            lines.append(f"{index}. `{dataset_name}` - {summary} ({version.created_at.isoformat()})")
+        lines.extend(["", "**State changed:** No"])
+        return [
+            {"type": "trace", "message": "Reading branch mutation history..."},
+            {"type": "final_answer", "answer": "\n".join(lines), "state_changed": False},
+        ]
+
     def _describe_last_change(self, branch: Branch) -> list[dict[str, Any]]:
         current = self.db.get(VersionNode, branch.current_version_id) if branch.current_version_id else None
         if current is None:
@@ -1184,10 +1274,28 @@ def _clarification_for_ambiguous_destructive_request(message: str) -> str | None
             "I need one clarification before changing data: which identifier field should define "
             "the missing-value drop?\n\n**State changed:** No"
         )
-    if any(phrase in lowered for phrase in ("clean this dataset", "remove bad records", "fix the data")):
+    ambiguous_phrases = (
+        "clean this dataset",
+        "remove bad records",
+        "drop bad records",
+        "delete bad rows",
+        "fix the data",
+        "drop everything irrelevant",
+        "remove irrelevant records",
+        "clean up the data",
+    )
+    if any(phrase in lowered for phrase in ambiguous_phrases):
         return (
-            "I need one clarification before changing data: what exact rule should I use to decide "
-            "which records or fields are bad?\n\n**State changed:** No"
+            "I need one clarification before making a destructive data change: what exact rule "
+            "should define a bad record?\n\n"
+            "Options I can apply:\n"
+            "1. Remove records with missing title.\n"
+            "2. Remove duplicate records by country/doc_number/kind/title.\n"
+            "3. Remove invalid date records.\n"
+            "4. Remove records with missing country/doc_number.\n"
+            "5. Filter by status, country, or date.\n\n"
+            "Please choose the rule you want me to apply.\n\n"
+            "**State changed:** No"
         )
     return None
 
@@ -1229,6 +1337,13 @@ def _branch_name_from_message(message: str) -> str | None:
 def _clean_branch_name(value: str) -> str:
     cleaned = "".join(character for character in value.strip() if character.isalnum() or character in {"-", "_"})
     return cleaned[:80] or f"branch-{new_id()[:6]}"
+
+
+def _expected_effect(summary: str, dataset_name: str) -> str:
+    cleaned = summary.rstrip(".")
+    if cleaned:
+        return f"{cleaned}. The working state for `{dataset_name}` will be updated if you approve."
+    return f"The working state for `{dataset_name}` will be updated if you approve."
 
 
 def _branch_exists(session_id: str, name: str, db: Session) -> bool:

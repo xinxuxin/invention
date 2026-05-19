@@ -14,9 +14,15 @@ from typing import Any
 
 QUICK_QUESTIONS = [
     {
-        "id": "inspect",
+        "id": "inspect_file",
         "prompt": "What is in this file? Please inspect the object type, size, structure, and show a few representative examples.",
-        "expects": ["no_step_budget", "mentions_patent_metadata", "state_changed_false"],
+        "expects": [
+            "no_step_budget",
+            "mentions_patent_metadata",
+            "state_changed_false",
+            "no_raw_dict_preview",
+            "no_public_verifier_exception",
+        ],
     },
     {
         "id": "tabular_preview",
@@ -34,14 +40,29 @@ QUICK_QUESTIONS = [
         "expects": ["table_artifact", "state_changed_false"],
     },
     {
-        "id": "country_chart",
-        "prompt": "Create a bar chart showing the number of patent records by country.",
-        "expects": ["chart_artifact"],
+        "id": "filings_chart",
+        "prompt": "Create a line chart or bar chart showing filings by year based on filing_date.",
+        "expects": ["chart_artifact", "chart_data_valid"],
     },
     {
         "id": "export_top5",
         "prompt": "Export that top-5 table as CSV, but do not change the working dataset.",
         "expects": ["csv_artifact", "state_changed_false"],
+    },
+    {
+        "id": "ambiguous_remove_bad",
+        "prompt": "Remove bad records.",
+        "expects": ["clarification_answer", "no_python_execution", "state_changed_false"],
+    },
+    {
+        "id": "mutation_history",
+        "prompt": "Show me the mutation history so far.",
+        "expects": ["history_answer", "no_name_error", "state_changed_false"],
+    },
+    {
+        "id": "confirmation_summary",
+        "prompt": "Create a cleaned working dataset that removes records with missing titles. This should mutate the current dataset.",
+        "expects": ["confirmation_required", "confirmation_payload_summary"],
     },
 ]
 
@@ -80,8 +101,9 @@ def main() -> int:
     for question in QUICK_QUESTIONS:
         events = _chat(base_url, session_id, dataset_id, question["prompt"])
         final = next((event for event in events if event.get("type") == "final_answer"), {})
+        confirmation = next((event for event in events if event.get("type") == "confirmation_required"), {})
         artifacts = [event["artifact"] for event in events if event.get("type") == "artifact_created"]
-        checks = _run_checks(question["expects"], final, artifacts)
+        checks = _run_checks(question["expects"], final, artifacts, events, confirmation)
         results.append(
             {
                 "id": question["id"],
@@ -99,6 +121,8 @@ def main() -> int:
                     }
                     for artifact in artifacts
                 ],
+                "trace": [event.get("message") for event in events if event.get("type") == "trace"],
+                "confirmation": confirmation,
                 "event_types": [event.get("type") for event in events],
             }
         )
@@ -184,8 +208,15 @@ def _parse_sse_block(lines: list[str]) -> list[dict[str, Any]]:
     return events
 
 
-def _run_checks(expects: list[str], final: dict[str, Any], artifacts: list[dict[str, Any]]) -> dict[str, bool]:
+def _run_checks(
+    expects: list[str],
+    final: dict[str, Any],
+    artifacts: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    confirmation: dict[str, Any],
+) -> dict[str, bool]:
     answer = str(final.get("answer") or "").lower()
+    public_trace = "\n".join(str(event.get("message") or "") for event in events if event.get("type") == "trace")
     checks: dict[str, bool] = {}
     for expectation in expects:
         if expectation == "no_step_budget":
@@ -198,12 +229,39 @@ def _run_checks(expects: list[str], final: dict[str, Any], artifacts: list[dict[
             checks[expectation] = any(artifact.get("kind") == "table" for artifact in artifacts)
         elif expectation == "chart_artifact":
             checks[expectation] = any(artifact.get("kind") == "chart" for artifact in artifacts)
+        elif expectation == "chart_data_valid":
+            checks[expectation] = _has_valid_chart_data(artifacts)
         elif expectation == "csv_artifact":
             checks[expectation] = any(artifact.get("kind") == "csv" for artifact in artifacts)
         elif expectation == "no_wrapper_columns":
             checks[expectation] = not _has_wrapper_columns(artifacts)
         elif expectation == "schema_terms":
             checks[expectation] = all(term in answer for term in ("scalar", "date", "list"))
+        elif expectation == "no_raw_dict_preview":
+            checks[expectation] = "{'object_type':" not in answer and "... truncated ..." not in answer
+        elif expectation == "no_public_verifier_exception":
+            checks[expectation] = "JSONDecodeError" not in public_trace and "ValidationError" not in public_trace
+        elif expectation == "clarification_answer":
+            checks[expectation] = "please choose the rule" in answer
+        elif expectation == "no_python_execution":
+            checks[expectation] = not any(event.get("type") == "code_started" for event in events)
+        elif expectation == "history_answer":
+            checks[expectation] = "current branch" in answer or "original upload" in answer
+        elif expectation == "no_name_error":
+            checks[expectation] = "nameerror" not in answer and not any(
+                "NameError" in str(event.get("traceback") or "")
+                for event in events
+                if event.get("type") == "code_result_summary"
+            )
+        elif expectation == "confirmation_required":
+            checks[expectation] = bool(confirmation)
+        elif expectation == "confirmation_payload_summary":
+            checks[expectation] = bool(
+                confirmation.get("operation_summary")
+                and confirmation.get("proposed_code")
+                and confirmation.get("state_impact")
+                and confirmation.get("rollback_note")
+            )
         else:
             checks[expectation] = False
     return checks
@@ -216,6 +274,19 @@ def _has_wrapper_columns(artifacts: list[dict[str, Any]]) -> bool:
             key = column.get("key") if isinstance(column, dict) else column
             if str(key) in FORBIDDEN_COLUMNS:
                 return True
+    return False
+
+
+def _has_valid_chart_data(artifacts: list[dict[str, Any]]) -> bool:
+    for artifact in artifacts:
+        if artifact.get("kind") != "chart":
+            continue
+        spec = artifact.get("chart_spec") or artifact.get("metadata", {}).get("chart_spec") or {}
+        data = spec.get("data") if isinstance(spec, dict) else None
+        x = spec.get("x") if isinstance(spec, dict) else None
+        y = spec.get("y") if isinstance(spec, dict) else None
+        if isinstance(data, list) and data and isinstance(data[0], dict) and x in data[0] and y in data[0]:
+            return True
     return False
 
 
@@ -246,4 +317,3 @@ def _markdown_report(report: dict[str, Any]) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

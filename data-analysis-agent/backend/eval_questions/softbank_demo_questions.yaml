@@ -1,10 +1,12 @@
 questions:
-  - id: inspect
+  - id: inspect_file
     prompt: "What is in this file? Please inspect the object type, size, structure, and show a few representative examples."
     expects:
       - no_step_budget
       - mentions_patent_metadata
       - state_changed_false
+      - no_raw_dict_preview
+      - no_public_verifier_exception
   - id: tabular_preview
     prompt: "Convert this dataset into a tabular preview if possible. Show the inferred columns and the first 5 rows."
     expects:
@@ -21,12 +23,30 @@ questions:
     expects:
       - table_artifact
       - state_changed_false
-  - id: country_chart
-    prompt: "Create a bar chart showing the number of patent records by country."
+  - id: filings_chart
+    prompt: "Create a line chart or bar chart showing filings by year based on filing_date."
     expects:
       - chart_artifact
+      - chart_data_valid
   - id: export_top5
     prompt: "Export that top-5 table as CSV, but do not change the working dataset."
     expects:
       - csv_artifact
       - state_changed_false
+  - id: ambiguous_remove_bad
+    prompt: "Remove bad records."
+    expects:
+      - clarification_answer
+      - no_python_execution
+      - state_changed_false
+  - id: mutation_history
+    prompt: "Show me the mutation history so far."
+    expects:
+      - history_answer
+      - no_name_error
+      - state_changed_false
+  - id: confirmation_summary
+    prompt: "Create a cleaned working dataset that removes records with missing titles. This should mutate the current dataset."
+    expects:
+      - confirmation_required
+      - confirmation_payload_summary

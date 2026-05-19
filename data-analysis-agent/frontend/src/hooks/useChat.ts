@@ -45,6 +45,14 @@ export type PendingConfirmation = {
   code?: string | null;
   mutationSummary?: string | null;
   operationSummary?: string | null;
+  title?: string | null;
+  datasetName?: string | null;
+  expectedEffect?: string | null;
+  stateImpact?: string | null;
+  reversible?: boolean | null;
+  rollbackNote?: string | null;
+  confirmLabel?: string | null;
+  cancelLabel?: string | null;
   riskLevel?: string | null;
   affectedDatasetIds?: string[];
 };
@@ -332,9 +340,17 @@ function handleStreamEvent({
       originalMessage,
       confirmationId: event.confirmation_id,
       message: event.message,
-      code: event.code,
+      code: event.proposed_code ?? event.code,
       mutationSummary: event.mutation_summary,
       operationSummary: event.operation_summary,
+      title: event.title,
+      datasetName: event.dataset_name,
+      expectedEffect: event.expected_effect,
+      stateImpact: event.state_impact,
+      reversible: event.reversible,
+      rollbackNote: event.rollback_note,
+      confirmLabel: event.confirm_label,
+      cancelLabel: event.cancel_label,
       riskLevel: event.risk_level,
       affectedDatasetIds: event.affected_dataset_ids,
     });

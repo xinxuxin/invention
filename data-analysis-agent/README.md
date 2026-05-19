@@ -69,7 +69,8 @@ changed state, or whether a useful result should be finalized instead of burning
 If the optional LLM verifier is enabled, it checks semantic completeness from execution summaries and
 artifact metadata only. It does not call Python, does not invent data, and cannot override
 deterministic hard-rule failures. If it is missing, slow, rate-limited, invalid, or too expensive,
-the deterministic verifier is used so demos keep moving.
+the deterministic verifier is used so demos keep moving. Normal user-facing traces hide verifier
+parser exception details; set `SHOW_VERIFIER_DEBUG_TRACE=true` only when debugging locally.
 
 ```text
 React + Vite + TypeScript
@@ -142,6 +143,7 @@ LLM_VERIFIER_MODEL=gpt-4.1-mini
 LLM_VERIFIER_TIMEOUT_SECONDS=6
 LLM_VERIFIER_MAX_TOKENS=700
 LLM_VERIFIER_FAIL_OPEN=true
+SHOW_VERIFIER_DEBUG_TRACE=false
 DATABASE_URL=sqlite:///./data_analysis_agent.db
 STORAGE_DIR=.data
 BACKEND_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
@@ -386,7 +388,8 @@ analysis, and cross-session persistence.
 - Forking/branching mutation history: done.
 - Dangerous mutation confirmation: done.
 - Cross-session persistence: done via SQLite/filesystem plus frontend restore and `GET /api/sessions`.
-- Clarification before ambiguous dangerous writes: done through prompt behavior and fake-agent tests.
+- Clarification before ambiguous dangerous writes: done through controller preflight, prompt behavior,
+  and fake-agent tests.
 
 ## Security Notes
 

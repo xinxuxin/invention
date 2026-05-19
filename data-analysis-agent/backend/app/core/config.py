@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     llm_verifier_min_confidence: float = 0.70
     llm_verifier_fail_open: bool = True
     llm_verifier_hard_rule_authority: bool = False
+    show_verifier_debug_trace: bool = False
     verifier_time_budget_per_turn_seconds: int = 8
     verifier_skip_llm_after_step: int = 4
     frontend_inline_table_max_rows: int = 50

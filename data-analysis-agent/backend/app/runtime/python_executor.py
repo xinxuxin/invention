@@ -507,13 +507,31 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
         artifacts.append(_table_artifact_payload(name, dataframe_or_records, description=description))
         return {"kind": "table", "name": name}
 
-    def save_chart(name: str, chart_spec: Any, description: str | None = None) -> dict[str, str]:
+    def save_chart(*args: Any, description: str | None = None) -> dict[str, str]:
+        if len(args) == 1:
+            chart_spec = args[0]
+            if not isinstance(chart_spec, Mapping):
+                raise TypeError("save_chart(chart_spec) requires a mapping chart spec")
+            name = str(chart_spec.get("title") or "Chart")
+        elif len(args) >= 2:
+            name = str(args[0])
+            chart_spec = args[1]
+            if len(args) >= 3 and description is None:
+                description = str(args[2]) if args[2] is not None else None
+        else:
+            raise TypeError("save_chart requires chart_spec or name and chart_spec")
+
         safe_spec = _validated_chart_spec(name, chart_spec, description=description)
         artifacts.append(
             {
                 "kind": "chart",
                 "name": name,
-                "content": safe_spec,
+                "content": {
+                    "type": "chart",
+                    "title": safe_spec["title"],
+                    "description": safe_spec.get("description"),
+                    "chart_spec": safe_spec,
+                },
                 "metadata": {
                     "type": "chart",
                     "title": safe_spec["title"],
@@ -523,7 +541,7 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
                     "x": safe_spec["x"],
                     "y": safe_spec["y"],
                     "sampled": bool(safe_spec.get("_sampling")),
-                    "chart_spec": {key: value for key, value in safe_spec.items() if key != "data"},
+                    "chart_spec": safe_spec,
                 },
             }
         )

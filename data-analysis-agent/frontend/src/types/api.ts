@@ -129,6 +129,7 @@ export type ExecutionArtifact = {
   columns?: Array<Record<string, unknown>>;
   rows?: Array<Record<string, unknown>>;
   chart_spec?: Record<string, unknown> | null;
+  payload?: Record<string, unknown> | null;
   download_url?: string | null;
   source_message_id?: string | null;
   path: string;
@@ -170,6 +171,15 @@ export type ChatStreamEvent =
       code?: string | null;
       mutation_summary?: string | null;
       operation_summary?: string | null;
+      title?: string | null;
+      dataset_name?: string | null;
+      expected_effect?: string | null;
+      state_impact?: string | null;
+      reversible?: boolean | null;
+      rollback_note?: string | null;
+      proposed_code?: string | null;
+      confirm_label?: string | null;
+      cancel_label?: string | null;
       risk_level?: "low" | "medium" | "high" | string;
       affected_dataset_ids?: string[];
     }

@@ -46,7 +46,7 @@ class LLMVerifier:
             ), None
         except Exception as exc:
             if self.settings.llm_verifier_fail_open:
-                return None, f"LLM verifier unavailable; using deterministic verifier. ({type(exc).__name__})"
+                return None, self._fallback_trace(exc)
             raise
 
     def verify(
@@ -90,7 +90,15 @@ class LLMVerifier:
             max_output_tokens=self.settings.llm_verifier_max_tokens,
         )
         text = getattr(response, "output_text", None) or ""
-        parsed = json.loads(_strip_json_fence(text))
+        parsed = _parse_llm_json(text)
+        parsed.setdefault("passed", False)
+        parsed.setdefault("confidence", 0.0)
+        parsed.setdefault("missing_requirements", [])
+        parsed.setdefault("hallucination_risk", "medium")
+        parsed.setdefault("retry_instruction", None)
+        parsed.setdefault("final_answer_guidance", None)
+        parsed.setdefault("should_finalize", False)
+        parsed.setdefault("reasons", [])
         return LLMVerificationResult.model_validate(parsed)
 
     def _allowed(
@@ -122,7 +130,7 @@ class LLMVerifier:
         if mode == "deterministic" or not self.settings.llm_verifier_enabled:
             return None
         if not self.settings.openai_api_key:
-            return "LLM verifier unavailable; using deterministic verifier. (missing API key)"
+            return self._fallback_trace("missing API key")
         if deterministic_result.hard_fail or (
             deterministic_result.severity == "retry" and _deterministic_retry_is_authoritative(deterministic_result)
         ):
@@ -132,6 +140,15 @@ class LLMVerifier:
         if time.monotonic() - turn_started_at > self.settings.verifier_time_budget_per_turn_seconds:
             return "Skipping LLM verifier to keep response fast."
         return None
+
+    def _fallback_trace(self, reason: object) -> str:
+        if self.settings.show_verifier_debug_trace:
+            if isinstance(reason, BaseException):
+                detail = type(reason).__name__
+            else:
+                detail = str(reason)
+            return f"Verifier completed using deterministic checks. ({detail})"
+        return "Verifier completed using deterministic checks."
 
     def _payload(
         self,
@@ -181,13 +198,56 @@ def _deterministic_retry_is_authoritative(result: VerificationResult) -> bool:
     return any(marker in text for marker in ("table artifact", "chart artifact", "csv artifact", "wrapper columns", "state changed"))
 
 
+def _parse_llm_json(text: str) -> dict[str, Any]:
+    cleaned = _strip_json_fence(text)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        parsed = json.loads(_extract_first_json_object(cleaned))
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM verifier response must be a JSON object")
+    return parsed
+
+
 def _strip_json_fence(text: str) -> str:
     stripped = text.strip()
     if stripped.startswith("```"):
-        stripped = stripped.strip("`")
-        if stripped.startswith("json"):
-            stripped = stripped[4:]
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines)
     return stripped.strip()
+
+
+def _extract_first_json_object(text: str) -> str:
+    start = text.find("{")
+    if start < 0:
+        raise json.JSONDecodeError("No JSON object found", text, 0)
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        character = text[index]
+        if escape:
+            escape = False
+            continue
+        if character == "\\":
+            escape = True
+            continue
+        if character == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    raise json.JSONDecodeError("Unterminated JSON object", text, start)
 
 
 def _truncate_json(payload: dict[str, Any], limit: int) -> str:

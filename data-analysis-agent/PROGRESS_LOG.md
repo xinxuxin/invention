@@ -217,3 +217,18 @@
 - Added response composer that turns verified execution output into concise markdown with highlights, key findings, warnings, artifact references, and explicit state-change status.
 - Wired the chat loop to run verification after Python execution, stream verifier trace events, retry with verifier feedback when artifacts are missing, and compose final answers from verified results instead of dumping large JSON.
 - Added frontend support for final-answer highlight chips, warning callouts, simple markdown rendering, and verifier trace progress labels.
+- Started final SoftBank demo-blocker cleanup pass for verifier UX, chart rendering, safe mutation prompts, and response readability.
+- Updated `ResponseComposer` to summarize structured previews into object type, counts, representative fields, and schema groups instead of dumping raw Python dict/JSON previews.
+- Changed read-only operation labeling so `Mutation:` appears only when state actually changes; read-only summaries use `Analysis performed:`.
+- Hardened LLM verifier fallback parsing and public trace hygiene so JSONDecodeError/ValidationError details are hidden unless `SHOW_VERIFIER_DEBUG_TRACE=true`.
+- Updated `save_chart()` to accept both `save_chart(name, chart_spec, description=None)` and `save_chart(chart_spec)`, and to attach a full normalized `chart_spec` with data to artifact events.
+- Improved frontend chart artifact parsing to support nested `chart_spec` payloads and show a visible error card instead of blank chart space when a spec is invalid.
+- Added controller preflight clarification for ambiguous destructive prompts such as “Remove bad records” and “Clean this dataset” so they do not enter Python execution.
+- Expanded confirmation payloads and UI to show operation summary, dataset, expected effect, state impact, rollback note, risk, and code collapsed by default.
+- Added a controller-level mutation history shortcut so “Show me the mutation history so far” succeeds without undefined Python variables.
+- Added regression coverage for readable response composition, clean LLM verifier fallback, one-argument `save_chart`, full chart data in artifacts, ambiguity preflight, confirmation payloads, and mutation history shortcut behavior.
+- Verified backend lint passes: `ruff check .`.
+- Verified backend tests pass: `97 passed`.
+- Verified frontend build passes: `npm run build`.
+- Attempted frontend lint: `npm run lint` still fails because no ESLint configuration file exists in the frontend project.
+- Verified fake SoftBank quick eval passes with the updated inspect/table/schema/chart/export/ambiguous-delete/history/confirmation rubric.
