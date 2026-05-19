@@ -179,6 +179,7 @@ rows. Read-only analysis does not create new versions.
 Dangerous writes are paused behind confirmation. Risky operations include dropping rows/columns,
 deduplication, overwrites, destructive filtering, normalization overwrites, rollback, and destructive
 reshape. Ambiguous destructive requests should produce a clarification question instead of guessing.
+Rollback controls in the branch timeline also show a browser confirmation before applying state.
 
 ## Branching And Forking
 

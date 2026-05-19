@@ -144,3 +144,8 @@
 - Verified full backend tests pass: `47 passed`.
 - Verified backend lint passes: `ruff check .`.
 - Verified frontend build passes: `npm run build`.
+- Started full project audit against take-home checklist.
+- Confirmed required, stretch, and bonus capabilities are covered by implementation and tests.
+- Added browser confirmation for direct branch-timeline rollback controls so UI-triggered dangerous state changes also pause before applying.
+- Improved frontend API error parsing so FastAPI structured validation details are shown instead of generic status-only messages.
+- Verified clean local startup smoke: backend `GET /health` and Vite frontend HTML responded on `127.0.0.1`.

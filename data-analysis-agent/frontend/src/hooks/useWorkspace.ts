@@ -238,6 +238,13 @@ export function useWorkspace() {
         return;
       }
 
+      const shouldRollback = window.confirm(
+        "Rollback restores an earlier snapshot as the current dataset state. Apply this change?",
+      );
+      if (!shouldRollback) {
+        return;
+      }
+
       setHistoryAction(`rollback:${versionId}`);
       try {
         const response = await rollbackVersionRequest(session.id, versionId);

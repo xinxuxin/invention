@@ -244,11 +244,31 @@ function readErrorMessage(payload: string, status: number): string {
     if (typeof parsed.detail === "string") {
       return parsed.detail;
     }
+    if (Array.isArray(parsed.detail)) {
+      return parsed.detail
+        .map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+          if (item && typeof item === "object") {
+            const detail = item as { loc?: unknown; msg?: unknown };
+            const location = Array.isArray(detail.loc) ? detail.loc.join(".") : undefined;
+            const message = typeof detail.msg === "string" ? detail.msg : JSON.stringify(item);
+            return location ? `${location}: ${message}` : message;
+          }
+          return String(item);
+        })
+        .join("; ");
+    }
+    if (parsed.detail !== undefined) {
+      return JSON.stringify(parsed.detail);
+    }
   } catch {
     // Fall through to generic message.
   }
 
-  return `Request failed with status ${status}`;
+  const trimmed = payload.trim();
+  return trimmed ? `Request failed with status ${status}: ${trimmed}` : `Request failed with status ${status}`;
 }
 
 function parseSseBlock(block: string, onEvent: (event: ChatStreamEvent) => void) {
