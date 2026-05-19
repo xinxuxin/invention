@@ -201,6 +201,44 @@ def test_artifact_created_event_streams_separately(client: TestClient) -> None:
     assert download_response.status_code == 200
 
 
+def test_chart_artifact_streams_with_valid_spec(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "chart_rows = data.groupby('group', as_index=False)['value'].sum().to_dict('records')",
+                            "save_chart('Group totals', {'title': 'Group totals', 'chart_type': 'bar', 'data': chart_rows, 'x': 'group', 'y': 'value', 'description': 'Total value by group'})",
+                            "preview(chart_rows)",
+                        ]
+                    )
+                },
+            ),
+            _tool_response("final_answer", {"answer": "Created a bar chart."}),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Visualize this", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    chart = next(event["artifact"] for event in events if event["type"] == "artifact_created")
+    content = client.get(f"/api/sessions/{session_id}/artifacts/{chart['id']}/content").json()
+
+    assert response.status_code == 200
+    assert chart["kind"] == "chart"
+    assert chart["metadata"]["chart_type"] == "bar"
+    assert content["title"] == "Group totals"
+    assert content["x"] == "group"
+    assert content["y"] == "value"
+
+
 def _tool_response(name: str, arguments: dict) -> AgentModelResponse:
     call_id = f"call-{name}-{new_id()}"
     return AgentModelResponse(

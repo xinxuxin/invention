@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.models.entities import AnalysisSession, Branch, Dataset, VersionNode, new_id, utc_now
+from app.schemas.artifact import ChartArtifactSpec
 from app.services.artifacts import persist_artifact
 from app.services.introspection import introspect_object
 from app.services.versioning import latest_versions_for_branch, sync_branch_pointer
@@ -30,6 +31,10 @@ from app.storage.files import load_pickle, save_snapshot
 DEFAULT_TIMEOUT_SECONDS = 5
 DEFAULT_MAX_STDOUT = 20_000
 DEFAULT_MAX_PREVIEW = 12_000
+MAX_CHART_ROWS = 500
+MAX_CATEGORY_CHART_ROWS = 50
+
+
 class ExecutionArtifact(BaseModel):
     id: str
     name: str
@@ -434,14 +439,18 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
         return {"kind": "table", "name": name}
 
     def save_chart(name: str, chart_spec: Any) -> dict[str, str]:
-        safe_spec = _json_safe(chart_spec)
+        safe_spec = _validated_chart_spec(name, chart_spec)
         artifacts.append(
             {
                 "kind": "chart",
                 "name": name,
                 "content": json.dumps(safe_spec, ensure_ascii=False, indent=2),
                 "metadata": {
-                    "spec_type": type(chart_spec).__qualname__,
+                    "chart_type": safe_spec["chart_type"],
+                    "rows": len(safe_spec["data"]),
+                    "x": safe_spec["x"],
+                    "y": safe_spec["y"],
+                    "sampled": bool(safe_spec.get("_sampling")),
                 },
             }
         )
@@ -558,6 +567,134 @@ def _frame_from_records(value: Any) -> pd.DataFrame:
         return pd.DataFrame([value])
 
     return pd.DataFrame(value)
+
+
+def _validated_chart_spec(name: str, chart_spec: Any) -> dict[str, Any]:
+    raw = _json_safe(chart_spec)
+    if not isinstance(raw, Mapping):
+        raise ValueError("Chart spec must be a mapping with chart_type, data, x, and y")
+
+    data_value = raw.get("data")
+    if isinstance(data_value, Mapping):
+        data = _records_from_table(data_value)
+    elif isinstance(data_value, Sequence) and not isinstance(data_value, (str, bytes, bytearray)):
+        data = [item for item in data_value if isinstance(item, Mapping)]
+    else:
+        data = []
+
+    if not data:
+        raise ValueError("Chart spec must include data as a list of objects")
+
+    chart_type = str(raw.get("chart_type") or raw.get("type") or raw.get("mark") or "bar").lower()
+    if chart_type not in {"bar", "line", "pie", "scatter", "area"}:
+        raise ValueError(f"Unsupported chart_type '{chart_type}'")
+
+    x = raw.get("x") or _encoding_field(raw, "x")
+    y = raw.get("y") or _encoding_field(raw, "y")
+    x_key, y_key = _infer_chart_fields(data, str(chart_type), str(x) if x else None, str(y) if y else None)
+
+    if not all(x_key in row for row in data):
+        raise ValueError(f"Chart x field '{x_key}' is missing from one or more rows")
+    if not all(y_key in row for row in data):
+        raise ValueError(f"Chart y field '{y_key}' is missing from one or more rows")
+
+    data, sampling = _reduce_chart_data(data, chart_type, x_key, y_key)
+    spec = ChartArtifactSpec(
+        id=str(raw.get("id") or new_id()),
+        title=str(raw.get("title") or name),
+        chart_type=chart_type,  # type: ignore[arg-type]
+        data=[dict(row) for row in data],
+        x=x_key,
+        y=y_key,
+        color=str(raw["color"]) if raw.get("color") else None,
+        description=str(raw["description"]) if raw.get("description") else None,
+    ).model_dump(exclude_none=True)
+    if sampling:
+        spec["_sampling"] = sampling
+    return spec
+
+
+def _encoding_field(raw: Mapping[str, Any], channel: str) -> str | None:
+    encoding = raw.get("encoding")
+    if not isinstance(encoding, Mapping):
+        return None
+    value = encoding.get(channel)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping) and isinstance(value.get("field"), str):
+        return value["field"]
+    return None
+
+
+def _infer_chart_fields(
+    data: Sequence[Mapping[str, Any]],
+    chart_type: str,
+    x: str | None,
+    y: str | None,
+) -> tuple[str, str]:
+    keys = list(data[0].keys())
+    if not keys:
+        raise ValueError("Chart rows must have at least one field")
+
+    if x and y:
+        return x, y
+
+    numeric_keys = [
+        key
+        for key in keys
+        if any(isinstance(row.get(key), (int, float)) and not isinstance(row.get(key), bool) for row in data)
+    ]
+    categorical_keys = [key for key in keys if key not in numeric_keys]
+
+    inferred_y = y or (numeric_keys[1] if chart_type == "scatter" and len(numeric_keys) > 1 else numeric_keys[0] if numeric_keys else keys[-1])
+    inferred_x = x or (
+        numeric_keys[0]
+        if chart_type == "scatter" and numeric_keys and numeric_keys[0] != inferred_y
+        else categorical_keys[0]
+        if categorical_keys
+        else next((key for key in keys if key != inferred_y), keys[0])
+    )
+    return str(inferred_x), str(inferred_y)
+
+
+def _reduce_chart_data(
+    data: Sequence[Mapping[str, Any]],
+    chart_type: str,
+    x: str,
+    y: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    rows = [dict(row) for row in data]
+    original_count = len(rows)
+
+    if chart_type in {"bar", "pie"} and original_count > MAX_CATEGORY_CHART_ROWS:
+        frame = pd.DataFrame(rows)
+        if x in frame.columns and y in frame.columns and pd.api.types.is_numeric_dtype(frame[y]):
+            grouped = frame.groupby(x, dropna=False, as_index=False)[y].sum()
+            grouped = grouped.sort_values(y, key=lambda series: series.abs(), ascending=False)
+            reduced = _json_safe(grouped.head(MAX_CATEGORY_CHART_ROWS).to_dict(orient="records"))
+            return reduced, {
+                "method": "aggregate_top_categories",
+                "original_rows": original_count,
+                "saved_rows": len(reduced),
+            }
+
+        reduced = rows[:MAX_CATEGORY_CHART_ROWS]
+        return reduced, {
+            "method": "head",
+            "original_rows": original_count,
+            "saved_rows": len(reduced),
+        }
+
+    if original_count > MAX_CHART_ROWS:
+        step = max(1, math.ceil(original_count / MAX_CHART_ROWS))
+        reduced = rows[::step][:MAX_CHART_ROWS]
+        return reduced, {
+            "method": "even_sample",
+            "original_rows": original_count,
+            "saved_rows": len(reduced),
+        }
+
+    return rows, None
 
 
 def _preview(value: Any) -> Any:

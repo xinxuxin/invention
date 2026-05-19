@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 
@@ -149,7 +150,8 @@ def test_artifact_helpers_store_files_and_metadata(db_session: Session) -> None:
             [
                 "save_csv('values export', data)",
                 "save_table('values table', data.head(2))",
-                "save_chart('values chart', {'mark': 'bar', 'encoding': {'x': 'group'}})",
+                "chart_rows = data.groupby('group', as_index=False)['value'].sum().to_dict('records')",
+                "save_chart('values chart', {'title': 'Values by group', 'chart_type': 'bar', 'data': chart_rows, 'x': 'group', 'y': 'value', 'description': 'Grouped totals'})",
                 "preview(data)",
             ]
         ),
@@ -164,6 +166,48 @@ def test_artifact_helpers_store_files_and_metadata(db_session: Session) -> None:
     for artifact in artifacts:
         assert Path(artifact.path).exists()
         assert artifact.artifact_metadata
+
+
+def test_chart_artifact_validates_and_reduces_large_data(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "rows = [{'category': f'c{i}', 'value': i} for i in range(120)]",
+                "save_chart('large chart', {'title': 'Large chart', 'chart_type': 'bar', 'data': rows, 'x': 'category', 'y': 'value'})",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    artifact = next(item for item in result.artifacts if item.kind == "chart")
+    payload = json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert artifact.metadata["chart_type"] == "bar"
+    assert artifact.metadata["rows"] == 50
+    assert artifact.metadata["sampled"] is True
+    assert payload["chart_type"] == "bar"
+    assert len(payload["data"]) == 50
+    assert payload["_sampling"]["method"] == "aggregate_top_categories"
+
+
+def test_invalid_chart_artifact_returns_traceback(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "save_chart('bad chart', {'chart_type': 'radar', 'data': [{'x': 'a', 'y': 1}], 'x': 'x', 'y': 'y'})",
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is False
+    assert result.traceback is not None
+    assert "Unsupported chart_type" in result.traceback
 
 
 def test_timeout_returns_failure(db_session: Session) -> None:

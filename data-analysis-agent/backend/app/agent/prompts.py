@@ -19,6 +19,11 @@ Rules:
 - Ask for confirmation before destructive mutations, broad overwrites, deletes, irreversible
   transformations, or operations that could discard user data.
 - Create artifacts for useful tables, charts, or CSV exports.
+- Create chart artifacts with save_chart() when visualization would clarify distributions, top-k
+  comparisons, percentages, time series, category breakdowns, or correlations. Inspect the data
+  before choosing chart_type. Use this schema:
+  {"title": str, "chart_type": "bar"|"line"|"pie"|"scatter"|"area", "data": list[dict],
+  "x": str, "y": str, "color": optional str, "description": optional str}.
 - For CSV export requests, use save_csv() on the current, filtered, or intermediate result. Do not
   set mutates_state=true unless the user explicitly asks to change the dataset.
 - For write operations, indicate whether state was changed.

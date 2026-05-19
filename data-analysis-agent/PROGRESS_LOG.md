@@ -80,3 +80,15 @@
 - Verified backend tests pass: `25 passed`.
 - Verified backend lint passes: `ruff check .`.
 - Verified frontend build passes: `npm run build`.
+- Started dynamic visualization artifact phase.
+- Added chart artifact schema with `id`, `title`, `chart_type`, `data`, `x`, `y`, optional `color`, and optional `description`.
+- Updated executor `save_chart()` to validate chart specs, infer legacy `mark`/encoding fields when possible, and reject unsupported chart types with tracebacks.
+- Added chart payload reduction: large bar/pie data aggregates top categories, while large line/scatter/area data is evenly sampled before saving.
+- Updated agent prompt/tool description so visualization requests use inspected data and `save_chart()` without hardcoded chart choices.
+- Expanded Recharts rendering for chart artifacts to support bar, line, pie, scatter, and area charts.
+- Added polished chart artifact cards with title, description, chart, data preview, and a client-side CSV export button for chart data.
+- Added backend tests for chart artifact streaming, chart validation, and large-data reduction.
+- Browser smoke-tested the app shell after chart-card changes: API online, artifacts panel present, and chat workspace intact.
+- Verified backend tests pass: `28 passed`.
+- Verified backend lint passes: `ruff check .`.
+- Verified frontend build passes: `npm run build`.

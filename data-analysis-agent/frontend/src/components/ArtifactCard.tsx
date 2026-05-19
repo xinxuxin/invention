@@ -1,16 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   Line,
   LineChart,
+  Pie,
+  PieChart,
   ResponsiveContainer,
+  Scatter,
+  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { CalendarClock, Download, FileJson2, Table2 } from "lucide-react";
+import { BarChart3, CalendarClock, Download, FileJson2, Table2 } from "lucide-react";
 
 import { artifactDownloadUrl, getArtifactContent } from "../lib/api";
 import type { ExecutionArtifact } from "../types/api";
@@ -52,6 +59,8 @@ export function ArtifactCard({ sessionId, artifact }: ArtifactCardProps) {
               <Download className="h-4 w-4 text-teal-700" />
             ) : artifact.kind === "table" ? (
               <Table2 className="h-4 w-4 text-indigo-700" />
+            ) : artifact.kind === "chart" ? (
+              <BarChart3 className="h-4 w-4 text-cyan-700" />
             ) : (
               <FileJson2 className="h-4 w-4 text-rose-700" />
             )}
@@ -149,13 +158,9 @@ function CsvPreview({ content }: { content: string }) {
 }
 
 function ChartPreview({ spec }: { spec: unknown }) {
-  const rows = isRecord(spec) && Array.isArray(spec.data) ? spec.data.filter(isRecord) : [];
-  const keys = rows.length ? Object.keys(rows[0]) : [];
-  const xKey = keys.find((key) => typeof rows[0][key] === "string") ?? keys[0];
-  const yKey = keys.find((key) => typeof rows[0][key] === "number") ?? keys[1];
-  const mark = isRecord(spec) && typeof spec.mark === "string" ? spec.mark : "bar";
+  const chart = parseChartSpec(spec);
 
-  if (!rows.length || !xKey || !yKey) {
+  if (!chart) {
     return (
       <pre className="max-h-52 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100">
         {JSON.stringify(spec, null, 2)}
@@ -164,28 +169,144 @@ function ChartPreview({ spec }: { spec: unknown }) {
   }
 
   return (
-    <div className="h-56 rounded-md border border-border bg-white p-3">
-      <ResponsiveContainer width="100%" height="100%">
-        {mark === "line" ? (
-          <LineChart data={rows}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={xKey} />
-            <YAxis />
-            <Tooltip />
-            <Line type="monotone" dataKey={yKey} stroke="#0f766e" strokeWidth={2} />
-          </LineChart>
-        ) : (
-          <BarChart data={rows}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={xKey} />
-            <YAxis />
-            <Tooltip />
-            <Bar dataKey={yKey} fill="#0f766e" radius={[4, 4, 0, 0]} />
-          </BarChart>
-        )}
-      </ResponsiveContainer>
+    <div className="space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-bold">{chart.title}</p>
+          {chart.description ? (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{chart.description}</p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={() => downloadRowsAsCsv(`${chart.title || "chart-data"}.csv`, chart.data)}
+          className="shrink-0 rounded-md border border-border bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 transition hover:bg-slate-50"
+        >
+          Export data
+        </button>
+      </div>
+      <div className="h-64 rounded-md border border-border bg-white p-3">
+        <ResponsiveContainer width="100%" height="100%">
+          <RenderedChart chart={chart} />
+        </ResponsiveContainer>
+      </div>
+      <MiniTable rows={chart.data.slice(0, 6)} />
     </div>
   );
+}
+
+type ChartSpec = {
+  title: string;
+  chart_type: "bar" | "line" | "pie" | "scatter" | "area";
+  data: Record<string, unknown>[];
+  x: string;
+  y: string;
+  color?: string | null;
+  description?: string | null;
+};
+
+function RenderedChart({ chart }: { chart: ChartSpec }) {
+  const stroke = "#0f766e";
+  const fill = "#14b8a6";
+
+  if (chart.chart_type === "line") {
+    return (
+      <LineChart data={chart.data}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey={chart.x} />
+        <YAxis />
+        <Tooltip />
+        <Line type="monotone" dataKey={chart.y} stroke={stroke} strokeWidth={2} dot={false} />
+      </LineChart>
+    );
+  }
+
+  if (chart.chart_type === "area") {
+    return (
+      <AreaChart data={chart.data}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey={chart.x} />
+        <YAxis />
+        <Tooltip />
+        <Area type="monotone" dataKey={chart.y} stroke={stroke} fill={fill} fillOpacity={0.28} />
+      </AreaChart>
+    );
+  }
+
+  if (chart.chart_type === "pie") {
+    return (
+      <PieChart>
+        <Tooltip />
+        <Pie data={chart.data} dataKey={chart.y} nameKey={chart.x} outerRadius="82%" label>
+          {chart.data.map((_, index) => (
+            <Cell key={index} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+          ))}
+        </Pie>
+      </PieChart>
+    );
+  }
+
+  if (chart.chart_type === "scatter") {
+    return (
+      <ScatterChart>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey={chart.x} name={chart.x} />
+        <YAxis dataKey={chart.y} name={chart.y} />
+        <Tooltip cursor={{ strokeDasharray: "3 3" }} />
+        <Scatter data={chart.data} fill={fill} />
+      </ScatterChart>
+    );
+  }
+
+  return (
+    <BarChart data={chart.data}>
+      <CartesianGrid strokeDasharray="3 3" />
+      <XAxis dataKey={chart.x} />
+      <YAxis />
+      <Tooltip />
+      <Bar dataKey={chart.y} fill={fill} radius={[4, 4, 0, 0]} />
+    </BarChart>
+  );
+}
+
+const CHART_COLORS = ["#0f766e", "#2563eb", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#65a30d"];
+
+function parseChartSpec(spec: unknown): ChartSpec | null {
+  if (!isRecord(spec) || !Array.isArray(spec.data)) {
+    return null;
+  }
+
+  const data = spec.data.filter(isRecord);
+  if (!data.length) {
+    return null;
+  }
+
+  const chartType =
+    typeof spec.chart_type === "string"
+      ? spec.chart_type
+      : typeof spec.mark === "string"
+        ? spec.mark
+        : "bar";
+  if (!["bar", "line", "pie", "scatter", "area"].includes(chartType)) {
+    return null;
+  }
+
+  const keys = Object.keys(data[0]);
+  const x = typeof spec.x === "string" ? spec.x : keys[0];
+  const y = typeof spec.y === "string" ? spec.y : keys.find((key) => key !== x) ?? keys[1];
+  if (!x || !y) {
+    return null;
+  }
+
+  return {
+    title: typeof spec.title === "string" ? spec.title : "Chart",
+    chart_type: chartType as ChartSpec["chart_type"],
+    data,
+    x,
+    y,
+    color: typeof spec.color === "string" ? spec.color : null,
+    description: typeof spec.description === "string" ? spec.description : null,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -200,6 +321,26 @@ function formatCell(value: unknown) {
     return JSON.stringify(value);
   }
   return String(value);
+}
+
+function downloadRowsAsCsv(filename: string, rows: Record<string, unknown>[]) {
+  const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
+  const csv = [
+    columns.join(","),
+    ...rows.map((row) => columns.map((column) => csvCell(row[column])).join(",")),
+  ].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename.replace(/[^a-z0-9_.-]+/gi, "-");
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function csvCell(value: unknown) {
+  const text = value === null || value === undefined ? "" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
 function rowCount(metadata: Record<string, unknown>) {

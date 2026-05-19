@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ArtifactRead(BaseModel):
@@ -23,3 +23,31 @@ class ExportResponse(BaseModel):
     artifact: ArtifactRead | None
     message: str
     ok: bool = True
+
+
+ChartType = Literal["bar", "line", "pie", "scatter", "area"]
+
+
+class ChartArtifactSpec(BaseModel):
+    id: str | None = None
+    title: str
+    chart_type: ChartType
+    data: list[dict[str, Any]]
+    x: str
+    y: str
+    color: str | None = None
+    description: str | None = None
+
+    @field_validator("data")
+    @classmethod
+    def require_data(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not value:
+            raise ValueError("Chart data must contain at least one row")
+        return value
+
+    @field_validator("x", "y")
+    @classmethod
+    def require_field_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Chart field names cannot be empty")
+        return value

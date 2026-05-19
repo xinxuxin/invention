@@ -46,6 +46,23 @@ Helper functions available inside executed code:
 - `save_chart(name, chart_spec)`
 - `save_csv(name, dataframe_or_records)`
 
+Chart artifacts use a validated schema:
+
+```json
+{
+  "title": "Revenue by segment",
+  "chart_type": "bar",
+  "data": [{ "segment": "enterprise", "revenue": 2500 }],
+  "x": "segment",
+  "y": "revenue",
+  "color": "optional_field",
+  "description": "Optional chart subtitle"
+}
+```
+
+Supported `chart_type` values are `bar`, `line`, `pie`, `scatter`, and `area`. Oversized chart data
+is sampled or aggregated before the artifact is saved.
+
 ## CSV Export
 
 `POST /api/sessions/{session_id}/export` exports the current dataset snapshot for the active
