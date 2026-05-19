@@ -1,0 +1,20 @@
+suite: generated_mixed_top_level_collection
+dataset: agent_test_datasets/mixed_top_level_collection.pkl
+questions:
+  - id: inspect_mixed
+    prompt: "What's in this file? Explain each top-level element and its type."
+    expects:
+      - any_of: [mixed, top-level, DataFrame, numpy, tuple]
+  - id: preview_tabular_elements
+    prompt: "Try to convert each tabular-looking element into a preview table."
+    expects:
+      - table_artifact
+  - id: nested_records_fields
+    prompt: "Find all nested records and show their common fields."
+    expects:
+      - any_of: [record, field, payload]
+  - id: element_type_summary
+    prompt: "Create a summary table of top-level element types."
+    expects:
+      - table_artifact
+      - table_required_columns: [element_index, type]

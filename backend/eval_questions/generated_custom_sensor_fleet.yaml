@@ -1,0 +1,39 @@
+suite: generated_custom_sensor_fleet
+dataset: agent_test_datasets/custom_sensor_fleet.pkl
+questions:
+  - id: inspect_custom
+    prompt: "What's in this file? Explain the custom class structure."
+    expects:
+      - any_of: [SensorFleet, sensor, readings]
+  - id: readings_table
+    prompt: "Convert sensor readings into a table with sensor_id, timestamp, site, zone, temperature_c, vibration_g, battery_pct."
+    expects:
+      - table_artifact
+      - table_required_columns: [sensor_id, timestamp, site, zone, temperature_c, vibration_g, battery_pct]
+  - id: average_temperature_line
+    prompt: "Create a line chart of average temperature by hour."
+    expects:
+      - chart_artifact
+      - chart_type_line
+      - chart_data_valid
+  - id: alert_counts_bar
+    prompt: "Create a bar chart of alert counts by alert type."
+    expects:
+      - chart_artifact
+      - chart_type_bar
+      - chart_data_valid
+  - id: high_vibration_table
+    prompt: "Find sensors with high vibration alerts and show a table."
+    expects:
+      - table_artifact
+      - any_of: [sensor, vibration, alert]
+  - id: export_alerts
+    prompt: "Export all alerts as CSV with sensor_id, timestamp, alert_type, severity, value."
+    expects:
+      - csv_artifact
+      - state_changed_false
+  - id: remove_low_battery
+    prompt: "Remove readings with battery_pct below 5, but ask for confirmation first."
+    expects:
+      - confirmation_required
+      - state_not_changed_before_approval

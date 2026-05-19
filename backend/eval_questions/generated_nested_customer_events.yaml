@@ -1,0 +1,45 @@
+suite: generated_nested_customer_events
+dataset: agent_test_datasets/nested_customer_events.pkl
+questions:
+  - id: inspect_nested
+    prompt: "What's in this file? Explain the structure in plain English."
+    expects:
+      - any_of: [customer, event, support, order]
+      - any_of: [metadata, customers, lookup_tables]
+  - id: customer_preview
+    prompt: "Show a tabular preview of customers with customer_id, country, segment, joined_at, churn_risk."
+    expects:
+      - table_artifact
+      - table_required_columns: [customer_id, country, segment, joined_at, churn_risk]
+  - id: normalize_events
+    prompt: "Normalize all purchase events into a table with customer_id, event_id, timestamp, channel, event_type, order_total."
+    expects:
+      - table_artifact
+      - table_required_columns: [customer_id, event_id, timestamp, channel, event_type, order_total]
+      - min_rows: 1
+  - id: revenue_by_country_chart
+    prompt: "Create a bar chart of total order revenue by country."
+    expects:
+      - chart_artifact
+      - chart_type_bar
+      - chart_data_valid
+  - id: product_revenue
+    prompt: "Which products generate the most revenue? Remember items are nested inside events. Show a table."
+    expects:
+      - table_artifact
+      - any_of: [product, sku, revenue]
+  - id: support_churn
+    prompt: "Find customers with high churn risk and support tickets. Show a table."
+    expects:
+      - table_artifact
+      - any_of: [churn, support, ticket]
+  - id: export_risk_flags
+    prompt: "Export all risk flags as a CSV with customer_id, event_id, flag_type, severity."
+    expects:
+      - csv_artifact
+      - state_changed_false
+  - id: ambiguous_clean_nested
+    prompt: "Clean this dataset."
+    expects:
+      - clarification_answer
+      - state_changed_false

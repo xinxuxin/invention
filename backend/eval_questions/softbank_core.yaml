@@ -1,0 +1,108 @@
+suite: softbank_core
+description: Core rubric for the SoftBank patent portfolio pickle.
+dataset_env: E2E_SOFTBANK_PKL_PATH
+questions:
+  - id: inspect_file
+    prompt: "What's in this file?"
+    expects:
+      - state_changed_false
+      - max_execute_python_calls: 3
+      - mentions_patent_metadata
+      - mentions_24410
+      - no_raw_json
+      - mentions_representative_fields
+  - id: tabular_preview
+    prompt: "Convert this dataset into a tabular preview if possible. Show the inferred columns and the first 5 rows."
+    expects:
+      - table_artifact
+      - min_rows: 5
+      - table_required_columns: [country, doc_number, title, owners, assignees, filing_date, status]
+      - table_forbidden_columns: [__dict__, __pydantic_extra__, __pydantic_fields_set__, __pydantic_private__]
+      - list_fields_structured
+      - state_changed_false
+  - id: schema_summary
+    prompt: "Summarize the schema of this patent metadata dataset. Which fields are scalar fields, which are dates, and which are list-like fields?"
+    expects:
+      - schema_terms
+      - schema_domain_fields
+      - no_pydantic_in_answer
+      - state_changed_false
+  - id: top_countries
+    prompt: "Show the top countries by number of patent records. Return both a table and a short explanation."
+    expects:
+      - table_artifact
+      - country_count_table
+      - full_dataset_country_counts
+      - not_cn19_ca1_only
+      - state_changed_false
+  - id: filing_date_range
+    prompt: "What is the filing date range of this portfolio? Also summarize the number of filings by year in a table."
+    expects:
+      - filing_date_range_in_answer
+      - table_artifact
+      - filings_by_year_table
+      - no_duplicate_filings_tables
+      - max_execute_python_calls: 3
+      - state_changed_false
+  - id: country_pie_chart
+    prompt: "create a pie chart for country"
+    expects:
+      - chart_artifact
+      - chart_type_pie
+      - country_chart_fields
+      - chart_data_valid
+      - no_name_error
+      - no_save_chart_contract_error
+  - id: country_bar_chart
+    prompt: "Create a bar chart showing the number of patent records by country."
+    expects:
+      - chart_artifact
+      - chart_type_bar
+      - country_chart_fields
+      - chart_data_valid
+  - id: filings_line_chart
+    prompt: "Create a line chart showing filings by year based on filing_date."
+    expects:
+      - chart_artifact
+      - chart_type_line
+      - filings_chart_fields
+      - chart_data_valid
+      - chart_title_not_fake
+  - id: compound_table_chart
+    prompt: "Show the top 10 countries by record count as a table, then create a bar chart from the same data."
+    expects:
+      - table_artifact
+      - chart_artifact
+      - country_count_table
+      - country_chart_fields
+      - state_changed_false
+  - id: csv_export
+    prompt: "Export the top 10 countries table as CSV without changing the dataset."
+    expects:
+      - csv_artifact
+      - download_url_exists
+      - state_changed_false
+  - id: ambiguous_clean
+    prompt: "Remove bad records."
+    expects:
+      - clarification_answer
+      - no_python_execution
+      - state_changed_false
+  - id: delete_last_500
+    prompt: "delete last 500 entries"
+    expects:
+      - confirmation_required
+      - delete_last_500_confirmation
+      - state_not_changed_before_approval
+  - id: mutation_history
+    prompt: "Show me the mutation history so far."
+    expects:
+      - history_answer
+      - no_name_error
+      - state_changed_false
+  - id: persistence_refresh_check
+    special: refresh_persistence
+    prompt: "Scripted refresh persistence check"
+  - id: persistence_restart_check
+    special: restart_persistence
+    prompt: "Scripted backend restart persistence check"

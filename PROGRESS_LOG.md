@@ -313,3 +313,15 @@
 - Verified backend tests pass: `132 passed`.
 - Verified frontend lint passes: `npm run lint`.
 - Verified frontend build passes: `npm run build`.
+- Started full automated evaluation harness phase for SoftBank plus generated arbitrary-structure datasets.
+- Added `backend/scripts/create_agent_test_datasets.py` to generate nested customer events, mixed DataFrame/NumPy bundles, custom sensor fleet objects, and mixed top-level collections under repo-root `agent_test_datasets/`.
+- Reworked `backend/scripts/evaluate_agent_demo.py` into a suite-based evaluator with SSE parsing, confirmation handling, artifact content fetching, rubric checks, JSON/Markdown/chat transcript reports, raw event logs, optional Playwright screenshots, and generated dataset support.
+- Added eval suite YAML files for `softbank_core`, each generated single-dataset suite, and generated multi-dataset comparison.
+- Added backend unit tests for generated eval datasets, table artifact checks, raw Python repr rejection, and report Markdown structure.
+- Updated README with SoftBank/generated eval commands and report review workflow.
+- Verified backend lint passes: `ruff check app tests scripts`.
+- Verified backend tests pass: `136 passed`.
+- Verified frontend lint/build passes: `npm run lint && npm run build`.
+- Started current app from the repo root on `http://localhost:8000` and `http://localhost:5173` in deterministic fake-agent mode for regression eval.
+- Generated SoftBank eval report at `backend/eval_reports/softbank_latest`: `14 passed`, `1 warning`, `0 failed`.
+- Generated arbitrary generated-dataset eval report at `backend/eval_reports/generated_latest`: `10 passed`, `0 warning`, `21 failed`; failures are primarily fake-agent coverage gaps for nested/custom/mixed generated datasets and are intentionally visible in the report for reviewer triage.

@@ -332,7 +332,63 @@ cd backend
 pytest
 ```
 
-Run the optional end-to-end demo evaluator against a running backend:
+Generate the broader arbitrary-structure eval datasets:
+
+```bash
+python backend/scripts/create_agent_test_datasets.py
+```
+
+This writes:
+
+- `agent_test_datasets/nested_customer_events.pkl`
+- `agent_test_datasets/mixed_dataframe_numpy_bundle.pkl`
+- `agent_test_datasets/custom_sensor_fleet.pkl`
+- `agent_test_datasets/mixed_top_level_collection.pkl`
+
+Run the automated SoftBank eval against a running backend:
+
+```bash
+python backend/scripts/evaluate_agent_demo.py \
+  --suite softbank_core \
+  --dataset /Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl \
+  --base-url http://localhost:8000 \
+  --frontend-url http://localhost:5173 \
+  --out backend/eval_reports/softbank_latest \
+  --include-screenshots
+```
+
+Run the generated arbitrary-dataset eval:
+
+```bash
+python backend/scripts/evaluate_agent_demo.py \
+  --suite generated_all \
+  --dataset-dir ./agent_test_datasets \
+  --base-url http://localhost:8000 \
+  --frontend-url http://localhost:5173 \
+  --out backend/eval_reports/generated_latest \
+  --include-screenshots
+```
+
+Use `--quick` for a shorter smoke pass, `--approve-mutations` when you intentionally want the
+harness to approve dangerous write confirmations, and `--browser-smoke`/`--include-screenshots`
+when Playwright is installed and the frontend is running.
+
+Each eval run creates:
+
+- `report.md`: human-reviewable pass/fail/warning summary, final answer excerpts, artifacts, trace
+  summaries, code snippets, and reviewer notes placeholders.
+- `report.json`: machine-readable rubric results.
+- `chat_transcript.md`: compact conversation transcript.
+- `raw_events/*.json`: complete SSE event logs for every question.
+- `screenshots/*.png`: optional frontend screenshots for chart/table/download smoke checks.
+
+The report is designed to help a human decide whether each answer is correct, not merely whether the
+API returned a 200. Checks use invariants such as required artifact types, table columns, chart
+schema, state-change behavior, verifier retries, forbidden internal error strings, and raw JSON
+leakage. Open `report.md` first, inspect failed questions, then open the corresponding
+`raw_events/*.json` and screenshot files for detail.
+
+Legacy quick command:
 
 ```bash
 cd backend
@@ -342,15 +398,10 @@ python scripts/evaluate_agent_demo.py \
   --base-url http://localhost:8000
 ```
 
-The evaluator creates a session, uploads the dataset, sends streamed chat questions, checks final
-answers and artifacts, then writes `report.json` and `report.md`. It does not require the optional
-LLM verifier unless your environment enables it.
-
-The suite covers upload/introspection, chat, mutation persistence, rollback, fork, CSV export after
-mutation, chart artifact creation, multi-dataset comparison, executor retry recovery, confirmation,
-and clarification behavior. If
-`/Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl` exists, it is also uploaded as
-a local smoke test for external custom-class pickle data.
+The full evaluator covers upload/introspection, chat persistence, streaming trace parsing,
+generated Python capture, artifact validation, chart smoke checks, mutation confirmation,
+cross-session restore checks, CSV export, multi-dataset comparison, LLM-verifier reporting, and
+arbitrary-object handling across SoftBank and generated nested/custom/mixed datasets.
 
 ## Demo Script
 

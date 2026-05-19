@@ -1,0 +1,28 @@
+suite: generated_multi_dataset
+datasets:
+  - agent_test_datasets/nested_customer_events.pkl
+  - agent_test_datasets/mixed_dataframe_numpy_bundle.pkl
+  - agent_test_datasets/custom_sensor_fleet.pkl
+questions:
+  - id: list_all_datasets
+    prompt: "List all datasets in this session. For each dataset, show object type, row count or length, and representative fields."
+    expects:
+      - table_artifact
+      - state_changed_false
+  - id: compare_datasets
+    prompt: "Compare the uploaded datasets by object type, approximate row count or length, schema style, and key fields."
+    expects:
+      - table_artifact
+      - any_of: [nested, NumPy, custom, class]
+  - id: identify_join_keys
+    prompt: "Inspect the uploaded datasets and identify possible join keys, if any. Do not join yet."
+    expects:
+      - state_changed_false
+      - any_of: [join, key, "no direct"]
+  - id: cross_dataset_chart
+    prompt: "Create a comparison chart showing approximate record counts for each uploaded dataset."
+    expects:
+      - table_artifact
+      - chart_artifact
+      - chart_type_bar
+      - chart_data_valid

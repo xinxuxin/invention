@@ -1,0 +1,45 @@
+suite: generated_mixed_dataframe_numpy_bundle
+dataset: agent_test_datasets/mixed_dataframe_numpy_bundle.pkl
+questions:
+  - id: inspect_bundle
+    prompt: "What's in this file? List all top-level keys and object types."
+    expects:
+      - must_contain: [users, orders]
+      - any_of: [embedding, cohort, array]
+  - id: list_shapes
+    prompt: "List all tables and arrays with their shapes."
+    expects:
+      - table_artifact
+      - any_of: [users, orders, daily_metrics, embedding, cohort]
+  - id: join_revenue_country
+    prompt: "Join users and orders on user_id, then show revenue by country as a table and chart."
+    expects:
+      - table_artifact
+      - chart_artifact
+      - state_changed_false
+  - id: daily_active_users_chart
+    prompt: "Create a line chart of daily active_users over time."
+    expects:
+      - chart_artifact
+      - chart_type_line
+      - chart_data_valid
+  - id: latency_error_scatter
+    prompt: "Create a scatter chart of latency_ms_p95 versus error_rate."
+    expects:
+      - chart_artifact
+      - chart_type_scatter
+      - chart_data_valid
+  - id: embedding_summary
+    prompt: "Inspect the user_embedding_matrix and summarize its shape and basic statistics."
+    expects:
+      - any_of: ["500", "16"]
+      - state_changed_false
+  - id: order_status_category
+    prompt: "Compare paid versus refunded orders by product category."
+    expects:
+      - table_artifact
+  - id: export_top_users
+    prompt: "Export the top 20 users by total gross_revenue as CSV."
+    expects:
+      - csv_artifact
+      - state_changed_false
