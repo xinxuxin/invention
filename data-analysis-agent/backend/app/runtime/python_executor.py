@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import csv
 import hashlib
 import io
 import json
@@ -641,7 +642,9 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
         if kw_data is not None:
             if not isinstance(chart_spec, Mapping):
                 raise ValueError("save_chart data= requires chart_spec to be a mapping")
-            chart_spec = {**dict(chart_spec), "data": kw_data}
+            chart_spec = dict(chart_spec)
+            if not chart_spec.get("data"):
+                chart_spec["data"] = kw_data
 
         safe_spec = _validated_chart_spec(name, chart_spec, description=description)
         artifacts.append(
@@ -688,12 +691,12 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
             dataframe_or_records = kw_data
         else:
             raise ValueError("save_csv requires data to export")
-        frame = _frame_from_records(dataframe_or_records)
+        frame = _prepare_csv_frame(_frame_from_records(dataframe_or_records))
         artifacts.append(
             {
                 "kind": "csv",
                 "name": name,
-                "content": frame.to_csv(index=False),
+                "content": frame.to_csv(index=False, quoting=csv.QUOTE_NONNUMERIC),
                 "metadata": {
                     "type": "csv",
                     "title": name,
@@ -967,6 +970,12 @@ def _table_artifact_payload(
             "columns": document["columns"],
             "rows": document["preview_rows"],
             "row_count": document["row_count"],
+            "column_count": document["column_count"],
+            "total_column_count": document["total_column_count"],
+            "display_column_count": document["display_column_count"],
+            "preview_column_count": document["preview_column_count"],
+            "hidden_columns": document["hidden_columns"],
+            "display_columns": document["display_columns"],
             "source_row_count": document["source_row_count"],
             "source_total_row_count": document["source_total_row_count"],
             "analyzed_row_count": document["analyzed_row_count"],
@@ -998,26 +1007,33 @@ def _table_document(
     frame = frame.copy()
     frame.columns = _unique_column_names(frame.columns)
 
+    full_columns = [str(column) for column in frame.columns]
     if columns_override is not None:
-        ordered_columns = [str(column) for column in columns_override][:MAX_TABLE_COLUMNS]
+        ordered_columns = [str(column) for column in columns_override]
         for column in ordered_columns:
             if column not in frame.columns:
                 frame[column] = None
         frame = frame[ordered_columns]
-    else:
-        frame = frame.iloc[:, :MAX_TABLE_COLUMNS]
+        full_columns = ordered_columns
 
     row_count = row_count_override if row_count_override is not None else int(len(frame))
     stored_frame = frame.head(MAX_TABLE_STORED_ROWS)
     rows = [_normalize_table_record(row) for row in stored_frame.to_dict(orient="records")]
     columns = _table_columns(frame, rows)
-    preview_rows = rows[:MAX_TABLE_INLINE_ROWS]
+    display_columns = columns[:MAX_TABLE_COLUMNS]
+    display_column_keys = [column["key"] for column in display_columns]
+    preview_rows = [
+        {key: row.get(key) for key in display_column_keys if key in row}
+        for row in rows[:MAX_TABLE_INLINE_ROWS]
+    ]
+    hidden_columns = full_columns[MAX_TABLE_COLUMNS:]
 
     return {
         "type": "table",
         "title": str(name),
         "description": description,
         "columns": columns,
+        "display_columns": display_columns,
         "rows": rows,
         "preview_rows": preview_rows,
         "row_count": int(row_count),
@@ -1029,7 +1045,12 @@ def _table_document(
         "is_sampled": bool(analyzed_row_count < source_row_count),
         "stored_row_count": len(rows),
         "stored_column_count": len(columns),
-        "truncated": bool(row_count > len(rows) or len(frame.columns) > len(columns)),
+        "column_count": len(columns),
+        "total_column_count": len(columns),
+        "display_column_count": len(display_columns),
+        "preview_column_count": len(display_columns),
+        "hidden_columns": hidden_columns,
+        "truncated": bool(row_count > len(rows) or hidden_columns),
     }
 
 
@@ -1108,7 +1129,7 @@ def _unique_column_names(columns: Sequence[Any]) -> list[str]:
 
 def _table_columns(frame: pd.DataFrame, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
     columns: list[dict[str, str]] = []
-    for column in list(frame.columns)[:MAX_TABLE_COLUMNS]:
+    for column in list(frame.columns):
         columns.append(
             {
                 "key": str(column),
@@ -1120,6 +1141,8 @@ def _table_columns(frame: pd.DataFrame, rows: Sequence[Mapping[str, Any]]) -> li
 
 
 def _infer_table_column_type(column: str, rows: Sequence[Mapping[str, Any]]) -> str:
+    if _is_identifier_column(column):
+        return "identifier"
     for row in rows[:MAX_TABLE_INLINE_ROWS]:
         value = row.get(column)
         if value is None:
@@ -1142,27 +1165,34 @@ def _infer_table_column_type(column: str, rows: Sequence[Mapping[str, Any]]) -> 
 
 
 def _normalize_table_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    return {str(key): _table_cell_safe(value) for key, value in record.items()}
+    return {str(key): _table_cell_safe(value, column=str(key)) for key, value in record.items()}
 
 
-def _table_cell_safe(value: Any, *, depth: int = 0) -> Any:
+def _table_cell_safe(value: Any, *, column: str | None = None, depth: int = 0) -> Any:
     if value is None:
         return None
     if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
         return None
     if isinstance(value, np.generic):
-        return _table_cell_safe(value.item(), depth=depth + 1)
+        return _table_cell_safe(value.item(), column=column, depth=depth + 1)
     if isinstance(value, (pd.Timestamp, datetime, date)):
         return value.isoformat()
     if isinstance(value, str):
+        parsed = _parse_structured_string(value)
+        if parsed is not value:
+            return _table_cell_safe(parsed, column=column, depth=depth + 1)
         return _truncate_preview_string(value, MAX_TABLE_CELL_LENGTH)
     if isinstance(value, (int, bool)):
+        if column is not None and _is_identifier_column(column):
+            return str(value)
         return value
+    if isinstance(value, float) and column is not None and _is_identifier_column(column):
+        return str(int(value)) if value.is_integer() else str(value)
     if isinstance(value, Mapping):
         if depth >= MAX_PREVIEW_DEPTH:
             return _safe_repr(value, MAX_TABLE_CELL_LENGTH)
         return {
-            str(key): _table_cell_safe(item_value, depth=depth + 1)
+            str(key): _table_cell_safe(item_value, column=str(key), depth=depth + 1)
             for key, item_value in list(value.items())[:MAX_PREVIEW_ITEMS]
         }
     if isinstance(value, (list, tuple, set)):
@@ -1177,8 +1207,50 @@ def _table_cell_safe(value: Any, *, depth: int = 0) -> Any:
 
     attrs = safe_attrs(value)
     if attrs.keys() != {"repr"}:
-        return _table_cell_safe(_domain_record(attrs), depth=depth + 1)
+        return _table_cell_safe(_domain_record(attrs), column=column, depth=depth + 1)
     return _safe_repr(value, MAX_TABLE_CELL_LENGTH)
+
+
+def _is_identifier_column(column: str) -> bool:
+    lowered = column.lower()
+    return (
+        lowered in {"id", "country", "kind", "doc_number", "patent_number", "application_number", "publication_number"}
+        or lowered.endswith("_id")
+        or lowered.endswith("_number")
+    )
+
+
+def _parse_structured_string(value: str) -> Any:
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return value
+    try:
+        parsed = ast.literal_eval(stripped)
+    except (SyntaxError, ValueError):
+        return value
+    if isinstance(parsed, (list, tuple, set, dict)):
+        return parsed
+    return value
+
+
+def _prepare_csv_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    prepared = frame.copy()
+    prepared.columns = _unique_column_names(prepared.columns)
+    for column in prepared.columns:
+        column_name = str(column)
+        prepared[column] = prepared[column].map(lambda value, column_name=column_name: _csv_cell_safe(value, column_name))
+    return prepared
+
+
+def _csv_cell_safe(value: Any, column: str) -> Any:
+    value = _table_cell_safe(value, column=column)
+    if value is None:
+        return ""
+    if _is_identifier_column(column):
+        return str(value)
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
 
 
 def _looks_like_column_dict(value: Mapping[str, Any]) -> bool:
@@ -1356,9 +1428,10 @@ def _validated_chart_spec(name: str, chart_spec: Any, description: str | None = 
         data = []
 
     if not data:
-        raise ValueError("Chart spec must include data as a list of objects")
+        got_type = type(data_value).__name__ if data_value is not None else "missing"
+        raise ValueError(f"chart_spec.data must be a non-empty list of dict rows; got {got_type}")
 
-    chart_type = str(raw.get("chart_type") or raw.get("type") or raw.get("mark") or "bar").lower()
+    chart_type = _normalize_chart_type(raw.get("chart_type") or raw.get("type") or raw.get("mark") or "bar")
     if chart_type not in {"bar", "line", "pie", "scatter", "area"}:
         raise ValueError(f"Unsupported chart_type '{chart_type}'")
 
@@ -1387,6 +1460,21 @@ def _validated_chart_spec(name: str, chart_spec: Any, description: str | None = 
     if sampling:
         spec["_sampling"] = sampling
     return spec
+
+
+def _normalize_chart_type(value: Any) -> str:
+    text = str(value or "bar").strip().lower().replace("_", " ").replace("-", " ")
+    synonyms = {
+        "bar chart": "bar",
+        "column": "bar",
+        "column chart": "bar",
+        "line chart": "line",
+        "area chart": "area",
+        "pie chart": "pie",
+        "scatter chart": "scatter",
+        "scatter plot": "scatter",
+    }
+    return synonyms.get(text, text.split()[0] if text.endswith(" chart") and text.split() else text)
 
 
 def _encoding_field(raw: Mapping[str, Any], channel: str) -> str | None:

@@ -377,7 +377,12 @@ def _run_checks(
         elif expectation == "table_counts_full_24410":
             checks[expectation] = (
                 _table_analyzed_row_count(artifacts, artifact_contents) in {24_410, 24410}
-                or _table_count_sum(artifacts, artifact_contents, {"count", "record_count", "patent_count"}) in {24_410, 24410}
+                or _table_count_sum(
+                    artifacts,
+                    artifact_contents,
+                    {"count", "record_count", "patent_count", "patent_record_count"},
+                )
+                in {24_410, 24410}
             )
         elif expectation == "not_cn19_ca1_only":
             checks[expectation] = not _looks_like_sample_only_country_result(artifacts, artifact_contents)

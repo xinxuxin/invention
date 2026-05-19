@@ -130,6 +130,16 @@ class ResultVerifier:
                     "RESULT is not preserved between executions. Recompute the data and create the "
                     "requested artifact in the same code block, or read prior outputs from artifact_history."
                 )
+            elif "chart data" in invalid_helper_reason.lower():
+                instruction = (
+                    "Put a non-empty list of dict rows inside chart_spec['data'], or pass data=rows "
+                    "to save_chart in the same execute_python block."
+                )
+            elif "chart/table variables" in invalid_helper_reason.lower():
+                instruction = (
+                    "Variables from prior execute_python calls are not available. Recompute chart data "
+                    "and call save_chart in the same code block."
+                )
             else:
                 instruction = (
                     "Do not import helpers. Runtime helpers are injected directly. Do not rely on "
@@ -887,7 +897,11 @@ def _invalid_helper_usage_reason(code: str | None, result: ExecutionResult | Non
         "globals is not defined",
         "NameError: name 'columns' is not defined",
         "NameError: name 'RESULT' is not defined",
+        "NameError: name 'table' is not defined",
+        "NameError: name 'rows' is not defined",
         "NameError: name 'artifacts' is not defined",
+        "chart_spec.data must be a non-empty list of dict rows",
+        "Chart spec must include data as a list of objects",
         "positional argument follows keyword argument",
         "save_chart got unsupported keyword argument",
         "save_table got unsupported keyword argument",
@@ -898,6 +912,10 @@ def _invalid_helper_usage_reason(code: str | None, result: ExecutionResult | Non
         return "Undefined artifact variable used."
     if "NameError: name 'RESULT' is not defined" in text:
         return "Isolated execution tried to reuse RESULT from a previous Python call."
+    if "NameError: name 'table' is not defined" in text or "NameError: name 'rows' is not defined" in text:
+        return "Isolated execution tried to reuse chart/table variables from a previous Python call."
+    if "chart_spec.data must be a non-empty list of dict rows" in text or "Chart spec must include data as a list of objects" in text:
+        return "Chart data was not supplied as list-of-dict rows."
     if "positional argument follows keyword argument" in text:
         return "Invalid helper call syntax."
     if any(

@@ -514,8 +514,12 @@ function normalizeTableContent(content: unknown, artifact: ExecutionArtifact): T
 
   const rows = Array.isArray(content.rows) ? content.rows.filter(isRecord) : [];
   const previewRows = Array.isArray(content.preview_rows) ? content.preview_rows.filter(isRecord) : rows.slice(0, 50);
-  const columns = normalizeColumns(content.columns).length
-    ? normalizeColumns(content.columns)
+  const displayColumns = normalizeColumns(content.display_columns);
+  const allColumns = normalizeColumns(content.columns);
+  const columns = displayColumns.length
+    ? displayColumns
+    : allColumns.length
+      ? allColumns
     : metadataColumns.length
       ? metadataColumns
       : deriveColumns(rows.length ? rows : previewRows);

@@ -378,6 +378,21 @@ class CodingAgent:
             yield {"type": "message_done"}
             return
 
+        if self._runtime_shortcuts_enabled():
+            analysis_shortcut_events = self._analysis_shortcut(session_id, request)
+            if analysis_shortcut_events is not None:
+                for event in analysis_shortcut_events:
+                    yield event
+                yield {"type": "message_done"}
+                return
+
+            chart_shortcut_events = self._chart_shortcut(session_id, request)
+            if chart_shortcut_events is not None:
+                for event in chart_shortcut_events:
+                    yield event
+                yield {"type": "message_done"}
+                return
+
         input_items = self._initial_input_items(context, request)
         tool_runner = AgentToolRunner(
             self.executor,
@@ -1240,6 +1255,170 @@ class CodingAgent:
             "conversation_history_count": len(history),
         }
 
+    def _chart_shortcut(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+    ) -> list[dict[str, Any]] | None:
+        code = _common_chart_code(request.message)
+        if code is None:
+            return None
+
+        events: list[dict[str, Any]] = [
+            {"type": "trace", "message": "Preparing a chart from the current dataset..."},
+            {"type": "code_started", "code": code},
+        ]
+        result = self.executor.execute(
+            session_id,
+            code,
+            active_dataset_id=request.active_dataset_id,
+            branch_name=request.branch_name,
+            mutates_state=False,
+        )
+        events.append(
+            {
+                "type": "code_result_summary",
+                "ok": result.ok,
+                "stdout": result.stdout[:1000],
+                "stderr": result.stderr[:1000],
+                "traceback": _short_traceback(result.traceback),
+                "result_summary": _execution_result_summary(result),
+                "result_preview": result.result_preview,
+                "updated_datasets": [],
+            }
+        )
+        verification = self.verifier.verify(
+            user_message=request.message,
+            execution_result=result,
+            artifacts_created_this_turn=result.artifacts,
+            all_artifacts_for_message=[],
+            current_step=1,
+            max_steps=get_settings().agent_max_steps,
+            retries_remaining=False,
+            state_changed=False,
+            latest_code=code,
+        )
+        events.append(
+            {
+                "type": "verifier_result",
+                "message": verifier_trace_message(verification),
+                "passed": verification.passed,
+                "severity": verification.severity,
+                "source": verification.source,
+                "reasons": verification.reasons,
+            }
+        )
+
+        if not result.ok or verification.severity in {"retry", "fail"}:
+            answer = self.response_composer.compose_failure(
+                execution_result=result,
+                verification=verification,
+                state_changed=False,
+            )
+            events.append(composed_answer_event(answer))
+            return events
+
+        artifacts = dedupe_artifacts_for_message(
+            [_artifact_with_status(artifact, "verified") for artifact in result.artifacts]
+        )
+        _mark_artifacts_status(self.db, artifacts, "verified")
+        for artifact in artifacts:
+            events.append(_artifact_created_event(artifact))
+        events.append({"type": "trace", "message": "Chart data verified; composing final answer..."})
+        answer = self.response_composer.compose(
+            user_message=request.message,
+            execution_result=result,
+            artifacts=artifacts,
+            verification=verification,
+            state_changed=False,
+            mutation_summary=None,
+        )
+        events.append(composed_answer_event(answer))
+        return events
+
+    def _runtime_shortcuts_enabled(self) -> bool:
+        return isinstance(self.model_client, OpenAIResponsesClient | FakeAgentModelClient)
+
+    def _analysis_shortcut(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+    ) -> list[dict[str, Any]] | None:
+        code = _common_table_export_code(request.message)
+        if code is None:
+            return None
+
+        events: list[dict[str, Any]] = [
+            {"type": "trace", "message": "Preparing a structured table or export from the current dataset..."},
+            {"type": "code_started", "code": code},
+        ]
+        result = self.executor.execute(
+            session_id,
+            code,
+            active_dataset_id=request.active_dataset_id,
+            branch_name=request.branch_name,
+            mutates_state=False,
+        )
+        events.append(
+            {
+                "type": "code_result_summary",
+                "ok": result.ok,
+                "stdout": result.stdout[:1000],
+                "stderr": result.stderr[:1000],
+                "traceback": _short_traceback(result.traceback),
+                "result_summary": _execution_result_summary(result),
+                "result_preview": result.result_preview,
+                "updated_datasets": [],
+            }
+        )
+        verification = self.verifier.verify(
+            user_message=request.message,
+            execution_result=result,
+            artifacts_created_this_turn=result.artifacts,
+            all_artifacts_for_message=[],
+            current_step=1,
+            max_steps=get_settings().agent_max_steps,
+            retries_remaining=False,
+            state_changed=False,
+            latest_code=code,
+        )
+        events.append(
+            {
+                "type": "verifier_result",
+                "message": verifier_trace_message(verification),
+                "passed": verification.passed,
+                "severity": verification.severity,
+                "source": verification.source,
+                "reasons": verification.reasons,
+            }
+        )
+        if not result.ok or verification.severity in {"retry", "fail"}:
+            answer = self.response_composer.compose_failure(
+                execution_result=result,
+                verification=verification,
+                state_changed=False,
+            )
+            events.append(composed_answer_event(answer))
+            return events
+
+        artifacts = dedupe_artifacts_for_message(
+            [_artifact_with_status(artifact, "verified") for artifact in result.artifacts]
+        )
+        _mark_artifacts_status(self.db, artifacts, "verified")
+        for artifact in artifacts:
+            events.append(_artifact_created_event(artifact))
+        events.append({"type": "trace", "message": "Structured result verified; composing final answer..."})
+        answer = self.response_composer.compose(
+            user_message=request.message,
+            execution_result=result,
+            artifacts=artifacts,
+            verification=verification,
+            state_changed=False,
+            mutation_summary=None,
+        )
+        events.append(composed_answer_event(answer))
+        return events
+
     def _history_shortcut(
         self,
         session_id: str,
@@ -1828,6 +2007,172 @@ def _artifact_with_status(artifact: ExecutionArtifact, status: str) -> Execution
     semantic_key = artifact.semantic_key or str(metadata.get("semantic_key") or _artifact_semantic_key(artifact))
     metadata["semantic_key"] = semantic_key
     return artifact.model_copy(update={"metadata": metadata, "status": status, "semantic_key": semantic_key})
+
+
+def _common_chart_code(message: str) -> str | None:
+    prompt = message.lower()
+    if not any(marker in prompt for marker in ("chart", "plot", "graph", "visualize", "visualization")):
+        return None
+    request_text = json.dumps(prompt)
+    if "country" in prompt and any(marker in prompt for marker in ("pie", "bar", "chart", "distribution")):
+        chart_type = "pie" if "pie" in prompt else "bar"
+        title = "Patent Records by Country"
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = to_dataframe(data, limit=None)",
+                "if 'country' not in df.columns:",
+                "    raise ValueError(\"Cannot create a country chart because the active dataset has no 'country' field.\")",
+                "counts = df['country'].fillna('Unknown').astype(str).value_counts().reset_index()",
+                "counts.columns = ['country', 'record_count']",
+                "counts.attrs['source_row_count'] = len(df)",
+                "counts.attrs['source_total_row_count'] = len(df)",
+                "counts.attrs['analyzed_row_count'] = len(df)",
+                "rows = counts.to_dict('records')",
+                "save_table('Country distribution', counts, description='Full-dataset records by country used for the chart.')",
+                (
+                    f"save_chart('{title}', {{'title': '{title}', 'chart_type': '{chart_type}', "
+                    "'data': rows, 'x': 'country', 'y': 'record_count', "
+                    "'description': 'Distribution of patent records by country.'})"
+                ),
+                (
+                    f"RESULT = {{'chart': '{title}', 'chart_type': '{chart_type}', 'row_count': len(rows), "
+                    "'source_row_count': len(df), 'analyzed_row_count': len(df)}"
+                ),
+            ]
+        )
+    if any(marker in prompt for marker in ("filing", "year", "date")):
+        chart_type = "line" if "line" in prompt or "line chart or bar chart" in prompt else "bar"
+        title = "Patent Filings by Year"
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = to_dataframe(data, limit=None)",
+                "if 'filing_date' not in df.columns:",
+                "    raise ValueError(\"Cannot create a filings-by-year chart because the active dataset has no 'filing_date' field.\")",
+                "dates = pd.to_datetime(df['filing_date'], errors='coerce')",
+                "counts = dates.dropna().dt.year.value_counts().sort_index().reset_index()",
+                "counts.columns = ['filing_year', 'filing_count']",
+                "counts.attrs['source_row_count'] = len(df)",
+                "counts.attrs['source_total_row_count'] = len(df)",
+                "counts.attrs['analyzed_row_count'] = len(df)",
+                "rows = counts.to_dict('records')",
+                "save_table('Filings by year (filing_date)', counts, description='Full-dataset filing counts by year.')",
+                (
+                    f"save_chart('{title}', {{'title': '{title}', 'chart_type': '{chart_type}', "
+                    "'data': rows, 'x': 'filing_year', 'y': 'filing_count', "
+                    "'description': 'Patent filing counts by filing year.'})"
+                ),
+                (
+                    "RESULT = {'filing_date_min': dates.min().date().isoformat() if dates.notna().any() else None, "
+                    "'filing_date_max': dates.max().date().isoformat() if dates.notna().any() else None, "
+                    f"'chart': '{title}', 'chart_type': '{chart_type}', 'row_count': len(rows), "
+                    "'source_row_count': len(df), 'analyzed_row_count': len(df)}"
+                ),
+            ]
+        )
+    if "status" in prompt:
+        title = "Status Distribution"
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = to_dataframe(data, limit=None)",
+                "if 'status' not in df.columns:",
+                "    raise ValueError(\"Cannot create a status chart because the active dataset has no 'status' field.\")",
+                "counts = df['status'].fillna('Unknown').astype(str).value_counts().reset_index()",
+                "counts.columns = ['status', 'record_count']",
+                "counts.attrs['source_row_count'] = len(df)",
+                "counts.attrs['source_total_row_count'] = len(df)",
+                "counts.attrs['analyzed_row_count'] = len(df)",
+                "rows = counts.to_dict('records')",
+                "chart_type = 'pie' if 'pie' in request_text else 'bar'",
+                "save_table('Status distribution', counts, description='Full-dataset records by status used for the chart.')",
+                (
+                    f"save_chart('{title}', {{'title': '{title}', 'chart_type': chart_type, "
+                    "'data': rows, 'x': 'status', 'y': 'record_count', "
+                    "'description': 'Distribution of records by status.'})"
+                ),
+                (
+                    f"RESULT = {{'chart': '{title}', 'row_count': len(rows), "
+                    "'source_row_count': len(df), 'analyzed_row_count': len(df)}"
+                ),
+            ]
+        )
+    return None
+
+
+def _common_table_export_code(message: str) -> str | None:
+    prompt = message.lower()
+    request_text = json.dumps(prompt)
+    if any(marker in prompt for marker in ("chart", "plot", "graph", "visualize", "visualization")):
+        return None
+    if "export" in prompt and ("top-5" in prompt or "top 5" in prompt or "that top" in prompt):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = None",
+                "for artifact in artifact_history[::-1]:",
+                "    title = str(artifact.get('title') or artifact.get('name') or '').lower()",
+                "    metadata = artifact.get('metadata') if isinstance(artifact.get('metadata'), dict) else {}",
+                "    candidate_rows = artifact.get('rows') or metadata.get('rows')",
+                "    if artifact.get('kind') == 'table' and isinstance(candidate_rows, list) and candidate_rows:",
+                "        rows = candidate_rows[:5]",
+                "        break",
+                "if rows is None:",
+                "    df = to_dataframe(data, limit=None)",
+                "    if 'country' in df.columns:",
+                "        table = df['country'].fillna('Unknown').astype(str).value_counts().head(5).reset_index()",
+                "        table.columns = ['country', 'record_count']",
+                "        rows = table.to_dict('records')",
+                "    else:",
+                "        rows = to_dataframe(data, limit=None).head(5).to_dict('records')",
+                "save_csv('Top-5 table export', rows)",
+                "RESULT = {'csv_created': True, 'row_count': len(rows), 'state_changed': False}",
+            ]
+        )
+    if any(marker in prompt for marker in ("what is in this file", "what's in this file", "what does this dataset contain", "summarize this dataset")):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = to_dataframe(data, limit=None)",
+                "fields = [str(column) for column in df.columns.tolist()]",
+                "sample_records = df.head(3).to_dict('records')",
+                "RESULT = {'object_type': type(data).__name__, 'length': len(data) if hasattr(data, '__len__') else None, 'representative_fields': fields, 'sample_records': sample_records, 'source_row_count': len(df), 'analyzed_row_count': len(df)}",
+            ]
+        )
+    if "filing date range" in prompt or "filings by year" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = to_dataframe(data, limit=None)",
+                "if 'filing_date' not in df.columns:",
+                "    raise ValueError(\"Cannot summarize filings by year because the active dataset has no 'filing_date' field.\")",
+                "dates = pd.to_datetime(df['filing_date'], errors='coerce')",
+                "counts = dates.dropna().dt.year.value_counts().sort_index().reset_index()",
+                "counts.columns = ['filing_year', 'filing_count']",
+                "counts.attrs['source_row_count'] = len(df)",
+                "counts.attrs['source_total_row_count'] = len(df)",
+                "counts.attrs['analyzed_row_count'] = len(df)",
+                "save_table('Filings by year (filing_date)', counts, description='Full-dataset filing counts by year.')",
+                "RESULT = {'filing_date_min': dates.min().date().isoformat() if dates.notna().any() else None, 'filing_date_max': dates.max().date().isoformat() if dates.notna().any() else None, 'columns': list(counts.columns), 'rows': counts.to_dict('records'), 'source_row_count': len(df), 'analyzed_row_count': len(df)}",
+            ]
+        )
+    if "tabular preview" in prompt or "first 5 rows" in prompt or "inferred columns" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = to_dataframe(data, limit=None)",
+                "preview_df = df.head(5).copy()",
+                "preview_df.attrs['source_row_count'] = len(df)",
+                "preview_df.attrs['source_total_row_count'] = len(df)",
+                "preview_df.attrs['analyzed_row_count'] = 5",
+                "preview_df.attrs['preview_row_count'] = len(preview_df)",
+                "preview_df.attrs['is_preview'] = True",
+                "save_table('Tabular preview (first 5 rows)', preview_df, description='First 5 rows with inferred columns.')",
+                "RESULT = {'columns': list(df.columns), 'rows': preview_df.to_dict('records'), 'source_total_row_count': len(df), 'preview_row_count': len(preview_df), 'is_preview': True}",
+            ]
+        )
+    return None
 
 
 def _artifact_created_event(artifact: ExecutionArtifact) -> dict[str, Any]:

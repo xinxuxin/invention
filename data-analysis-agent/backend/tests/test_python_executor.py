@@ -1,3 +1,4 @@
+import csv
 import json
 import time
 from datetime import datetime
@@ -671,6 +672,88 @@ def test_save_table_accepts_objects_and_preserves_structured_cells(db_session: S
     assert payload["rows"][0]["filing_date"] == "2019-03-06T00:00:00"
 
 
+def test_save_table_keeps_full_columns_while_exposing_display_metadata(db_session: Session) -> None:
+    columns = [
+        "country",
+        "doc_number",
+        "kind",
+        "title",
+        "owners",
+        "inventors",
+        "assignees",
+        "filing_date",
+        "application_date",
+        "publication_date",
+        "priority_date",
+        "expiration_date",
+        "is_application",
+        "is_grant",
+        "is_other",
+        "num_claims",
+        "num_independent_claims",
+        "backward_citation_count",
+        "forward_citation_count",
+        "npl_citation_count",
+        "family_size",
+        "family_countries",
+        "cpc_sections",
+        "cpc_classes",
+        "cpc_subclasses",
+        "cpc_main_groups",
+        "cpc_subgroups",
+        "all_cpc_codes",
+        "ipc_codes",
+        "status",
+        "has_continuation",
+        "has_division",
+        "pta_days",
+        "num_legal_events",
+    ]
+    frame = pd.DataFrame([{column: column for column in columns}])
+    session_id, dataset_id = _create_dataset(db_session, value=frame)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(session_id, "save_table('wide preview', data.head(1))", active_dataset_id=dataset_id)
+
+    artifact = next(item for item in result.artifacts if item.kind == "table")
+    payload = json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert len(payload["columns"]) == 34
+    assert len(payload["display_columns"]) == 30
+    assert payload["total_column_count"] == 34
+    assert payload["hidden_columns"] == ["has_continuation", "has_division", "pta_days", "num_legal_events"]
+    assert "has_continuation" in payload["rows"][0]
+    assert "has_continuation" not in payload["preview_rows"][0]
+    assert artifact.metadata["total_column_count"] == 34
+
+
+def test_table_rows_preserve_identifier_strings_and_structured_lists(db_session: Session) -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "country": "CA",
+                "doc_number": 186426,
+                "owners": ["Softbank", "Huawei"],
+                "filing_date": datetime(2019, 3, 6),
+            }
+        ]
+    )
+    session_id, dataset_id = _create_dataset(db_session, value=frame)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(session_id, "save_table('identifier preview', data)", active_dataset_id=dataset_id)
+
+    artifact = next(item for item in result.artifacts if item.kind == "table")
+    payload = json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert payload["columns"][1]["type"] == "identifier"
+    assert payload["rows"][0]["doc_number"] == "186426"
+    assert payload["rows"][0]["owners"] == ["Softbank", "Huawei"]
+    assert payload["rows"][0]["filing_date"] == "2019-03-06T00:00:00"
+
+
 def test_result_preview_columns_rows_creates_inline_table_artifact(db_session: Session) -> None:
     session_id, dataset_id = _create_dataset(db_session)
     executor = PythonExecutor(db_session)
@@ -772,6 +855,44 @@ def test_save_chart_accepts_keyword_data_merge(db_session: Session) -> None:
     assert artifact.chart_spec["data"] == [{"country": "A", "count": 3}]
 
 
+def test_save_chart_accepts_keyword_chart_spec_and_chart_type_synonyms(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "rows = [{'country': 'CA', 'record_count': 4}]",
+                "save_chart(chart_spec={'title': 'Country pie', 'chart_type': 'pie chart', 'data': rows, 'x': 'country', 'y': 'record_count'})",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    artifact = next(item for item in result.artifacts if item.kind == "chart")
+
+    assert result.ok is True
+    assert artifact.title == "Country pie"
+    assert artifact.chart_spec is not None
+    assert artifact.chart_spec["chart_type"] == "pie"
+
+
+def test_save_chart_invalid_data_error_is_specific(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "save_chart('bad', {'title': 'Bad', 'chart_type': 'bar', 'data': 'not rows', 'x': 'x', 'y': 'y'})",
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is False
+    assert result.traceback is not None
+    assert "chart_spec.data must be a non-empty list of dict rows; got str" in result.traceback
+
+
 def test_save_csv_accepts_data_only_argument(db_session: Session) -> None:
     session_id, dataset_id = _create_dataset(db_session)
     executor = PythonExecutor(db_session)
@@ -786,6 +907,22 @@ def test_save_csv_accepts_data_only_argument(db_session: Session) -> None:
     artifact = next(item for item in result.artifacts if item.kind == "csv")
     assert artifact.title == "CSV export"
     assert artifact.metadata["row_count"] == 1
+
+
+def test_save_csv_preserves_identifier_strings_and_json_list_cells(db_session: Session) -> None:
+    frame = pd.DataFrame([{"doc_number": 186426, "owners": ["Softbank", "Huawei"], "value": 3}])
+    session_id, dataset_id = _create_dataset(db_session, value=frame)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(session_id, "save_csv('patent csv', data)", active_dataset_id=dataset_id)
+
+    artifact = next(item for item in result.artifacts if item.kind == "csv")
+    rows = list(csv.DictReader(Path(artifact.path).read_text(encoding="utf-8").splitlines()))
+
+    assert result.ok is True
+    assert rows[0]["doc_number"] == "186426"
+    assert json.loads(rows[0]["owners"]) == ["Softbank", "Huawei"]
+    assert rows[0]["value"] == "3"
 
 
 def test_invalid_chart_artifact_returns_traceback(db_session: Session) -> None:

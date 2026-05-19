@@ -75,6 +75,12 @@ Rules:
 - If the user asks for a chart, plot, graph, visualization, or distribution, call save_chart(...).
   For chart requests, also create save_table(...) for the underlying data when it helps the user
   inspect or export the values.
+- For every chart request, compute the chart rows and call save_chart in the same execute_python
+  block. Do not create rows/table in one execution and then refer to table, rows, RESULT, or other
+  local variables in a later execution.
+- Always include a non-empty list of dict rows inside chart_spec["data"], or pass the same rows with
+  data=rows. Prefer:
+  save_chart("Title", {"title": "Title", "chart_type": "bar", "data": rows, "x": "field", "y": "count"}).
 - If the user explicitly asks for a line chart, chart_type must be "line".
 - If the user asks for "line chart or bar chart" and the x-axis is a date, year, or time series,
   prefer chart_type "line".

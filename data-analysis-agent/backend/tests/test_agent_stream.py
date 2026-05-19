@@ -399,7 +399,7 @@ def test_artifact_created_event_streams_separately(client: TestClient) -> None:
     download_response = client.get(f"/api/sessions/{session_id}/artifacts/{artifact_id}/download")
 
     assert content_response.status_code == 200
-    assert "value,group" in content_response.text
+    assert '"value","group"' in content_response.text
     assert download_response.status_code == 200
 
 
@@ -948,6 +948,28 @@ def test_filing_date_retry_discards_sample_artifact_and_dedupes(client: TestClie
     assert [column["key"] for column in artifacts[0]["columns"]] == ["filing_year", "filing_count"]
     assert events[-2]["type"] == "final_answer"
     assert "step budget" not in events[-2]["answer"].lower()
+
+
+def test_country_pie_chart_shortcut_creates_valid_chart_without_model_call(client: TestClient) -> None:
+    session_response = client.post("/api/sessions", json={"name": "Agent test"})
+    assert session_response.status_code == 201
+    session_id = session_response.json()["id"]
+    dataset_id = _upload_pickle(client, session_id, "patents.pkl", _softbank_patent_dataset())
+    app.dependency_overrides.pop(get_model_client, None)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "create a pie chart for country", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    artifacts = [event["artifact"] for event in events if event["type"] == "artifact_created"]
+    chart = next(artifact for artifact in artifacts if artifact["kind"] == "chart")
+
+    assert response.status_code == 200
+    assert chart["chart_spec"]["chart_type"] == "pie"
+    assert chart["chart_spec"]["x"] == "country"
+    assert chart["chart_spec"]["data"]
+    assert not any("NameError" in str(event) for event in events)
 
 
 def _tool_response(name: str, arguments: dict) -> AgentModelResponse:

@@ -285,3 +285,18 @@
 - Verified frontend build passes: `npm run build`.
 - Verified deterministic SoftBank quick eval passes against local backend: `python backend/scripts/evaluate_agent_demo.py --quick --dataset /Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl --base-url http://localhost:8000`.
 - Ran real OpenAI-mode quick eval with the provided API key in process environment only; backend remained stable, but model output still showed non-deterministic misses on a few semantic/chart rubric checks, so the deterministic eval is the committed regression gate.
+- Started follow-up regression pass using `data-analysis-chat-2026-05-19T15-49-08-874Z.md` and the downloaded tabular preview CSV as failure sources.
+- Fixed table artifact storage so full rows/full columns are preserved for export while UI preview metadata (`display_columns`, `display_column_count`, `total_column_count`, `hidden_columns`) controls visible truncation.
+- Added table/CSV value normalization for identifier-like fields (`doc_number`, `*_id`, `*_number`, etc.) and structured list cells, keeping inline table values as arrays while serializing CSV list/object cells as JSON strings.
+- Hardened `save_chart()` to support one-arg specs, two-arg calls, keyword `chart_spec`, keyword `data`, chart-type synonyms such as `pie chart`, and clearer data-shape errors.
+- Added runtime chart shortcuts for common column-driven chart requests (country distribution, filings by year, status distribution) so chart data and `save_chart()` happen atomically in one isolated execution.
+- Added structured shortcuts for tabular preview, filing-date year tables, conceptual inspection, and top-5 table CSV export in real/fake runtime modes; scripted unit-test clients bypass these shortcuts so verifier retry tests still exercise the loop.
+- Strengthened verifier retry classification for `table`/`rows`/`RESULT` isolated variable reuse and missing chart data instructions.
+- Updated frontend table artifact rendering to use `display_columns` for the visible grid while downloading CSV from full artifact rows.
+- Expanded regression tests for full-column table artifacts, identifier/list CSV serialization, flexible chart helper signatures, chart helper errors, and shortcut pie-chart behavior.
+- Verified backend lint passes: `ruff check app tests scripts`.
+- Verified backend tests pass: `129 passed`.
+- Verified frontend lint passes: `npm run lint`.
+- Verified frontend build passes: `npm run build`.
+- Verified real OpenAI-mode SoftBank quick eval passes against local backend with the provided API key kept in process environment only.
+- Verified repeated country pie chart smoke: 3/3 runs created a non-empty `pie` chart artifact.

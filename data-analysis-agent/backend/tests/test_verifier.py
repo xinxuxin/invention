@@ -326,6 +326,40 @@ def test_result_nameerror_retry_mentions_isolated_execution() -> None:
     assert "RESULT is not preserved" in result.retry_instruction
 
 
+def test_table_nameerror_retry_mentions_atomic_chart_block() -> None:
+    result = ResultVerifier().verify(
+        user_message="create a pie chart for country",
+        execution_result=ExecutionResult(
+            ok=False,
+            stdout="",
+            stderr="",
+            traceback="NameError: name 'table' is not defined",
+            result_preview=None,
+        ),
+        retries_remaining=True,
+    )
+
+    assert result.severity == "retry"
+    assert "Recompute chart data" in result.retry_instruction
+
+
+def test_missing_chart_data_error_retries_with_data_instruction() -> None:
+    result = ResultVerifier().verify(
+        user_message="create a pie chart for country",
+        execution_result=ExecutionResult(
+            ok=False,
+            stdout="",
+            stderr="",
+            traceback="ValueError: chart_spec.data must be a non-empty list of dict rows; got str",
+            result_preview=None,
+        ),
+        retries_remaining=True,
+    )
+
+    assert result.severity == "retry"
+    assert "chart_spec['data']" in result.retry_instruction
+
+
 def test_useful_inspection_preview_finalizes() -> None:
     result = ResultVerifier().verify(
         user_message="What is in this file?",

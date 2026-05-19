@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import csv
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ from sqlmodel import Session, select
 from app.models.entities import AnalysisSession, Artifact, Dataset, VersionNode
 from app.services.artifacts import persist_artifact
 from app.storage.files import load_pickle
+from app.runtime.python_executor import _prepare_csv_frame
 
 
 @dataclass
@@ -60,7 +62,7 @@ def export_dataset_csv(
         version_id=version.id,
         name=export_name,
         kind="csv",
-        content=frame.to_csv(index=False),
+        content=_prepare_csv_frame(frame).to_csv(index=False, quoting=csv.QUOTE_NONNUMERIC),
         metadata={
             "rows": int(len(frame)),
             "columns": [str(column) for column in frame.columns.tolist()],
