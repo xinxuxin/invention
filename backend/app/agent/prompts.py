@@ -32,7 +32,8 @@ Rules:
   save_table(...), save_chart(...), or save_csv(...).
 - If a code execution returns ok=true with a useful non-null result_preview, do not retry only because
   stdout is empty.
-- The helpers safe_attrs, object_to_record, objects_to_records, to_dataframe, save_table,
+- The helpers safe_attrs, object_to_record, objects_to_records, to_dataframe, inspect_object,
+  summarize_structure, find_record_collections, get_path, flatten_records_at_path, save_table,
   save_chart, save_csv, preview_dataframe, and preview are directly available in the Python execution namespace.
   Do not import them from runtime or helpers, and do not use globals() to find them. Call them
   directly, for example: df = to_dataframe(data).
@@ -42,9 +43,22 @@ Rules:
   for artifact_history for compatibility, but prefer artifact_history in new code.
 - If result_preview contains enough information to answer the user, stop and call final_answer.
   Do not keep executing code just to polish the answer.
+- For conceptual inspection questions such as "what is in this file", "explain the structure",
+  "top-level keys", "object types", or "list all tables and arrays", do not immediately call
+  to_dataframe(data). First call inspect_object(data) or summarize_structure(data). Use
+  find_record_collections(data) to discover nested tables/records.
+- For nested objects, if the requested field is not a top-level DataFrame column, inspect the
+  structure, find record collections, locate a nested path, then normalize records with
+  flatten_records_at_path(data, "path.to.records") or object_to_record.
+- For dicts that contain DataFrames or arrays, inspect keys first and use the relevant object
+  directly; do not force the entire dict into one single-row DataFrame.
+- For custom classes, use inspect_object(data), safe_attrs/object_to_record, and discovered
+  collection paths such as readings or sensors.readings.
+- For mixed top-level lists, inspect each element type and create a summary table when a table is
+  requested; do not force unrelated elements into one DataFrame.
 - For "what is this file?", inspection, summary, schema, and preview requests, one or two
-  execute_python calls should be enough: inspect type/length/sample, then optionally convert a small
-  sample with preview_dataframe(data, limit=5).
+  execute_python calls should be enough: inspect type/length/sample or structure first, then
+  optionally convert a relevant record collection.
 - When mutating state, update only the intended dataset key in datasets or data. Do not rewrite other
   datasets accidentally.
 - Use Python code for data exploration.
@@ -96,10 +110,11 @@ Rules:
   analysis tools for branch operations.
 - For mutation or branch history questions, use the session context or controller response. Do not
   reference undefined variables named history, and do not use locals() or globals().
-- Prefer save_table("Title", data, description="...") and save_chart("Title", chart_spec, description="...").
-  The runtime also accepts save_table(name="Title", data=data), save_chart(chart_spec), and
-  save_chart(name="Title", chart_spec=spec, data=rows). Do not mix positional arguments after
-  keyword arguments.
+- Prefer save_table("Title", data, description="..."), save_chart("Title", chart_spec, description="..."),
+  and save_csv("Title", data). The runtime also accepts save_table(name="Title", data=data),
+  save_table(name="Title", rows=rows), save_chart(chart_spec), save_chart(name="Title", chart_spec=spec, data=rows),
+  save_csv(name="Title", rows=rows), and save_csv(name="Title", dataframe=df). Do not mix
+  positional arguments after keyword arguments.
 - If code fails, analyze the traceback and retry with a better generic approach.
 - Final answers must be concise, user-facing, and mention state changes and artifacts.
 - Do not reveal hidden chain-of-thought. Public trace messages should be short progress updates.

@@ -2014,7 +2014,84 @@ def _common_chart_code(message: str) -> str | None:
     if not any(marker in prompt for marker in ("chart", "plot", "graph", "visualize", "visualization")):
         return None
     request_text = json.dumps(prompt)
-    if "country" in prompt and any(marker in prompt for marker in ("pie", "bar", "chart", "distribution")):
+    has_country_intent = "country" in prompt or "countries" in prompt
+    if "active_users" in prompt or ("daily" in prompt and "active" in prompt):
+        title = "Daily Active Users"
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = data.get('daily_metrics') if isinstance(data, dict) and 'daily_metrics' in data else to_dataframe(data, limit=None)",
+                "date_col = next((c for c in df.columns if str(c).lower() in {'date', 'day'} or 'date' in str(c).lower()), None)",
+                "value_col = next((c for c in df.columns if str(c).lower() == 'active_users' or 'active' in str(c).lower()), None)",
+                "if date_col is None or value_col is None:",
+                "    raise ValueError('Could not find date and active_users fields for daily active users chart.')",
+                "rows = df[[date_col, value_col]].rename(columns={date_col: 'date', value_col: 'active_users'}).to_dict('records')",
+                "save_table('Daily active users', rows, description='Underlying daily active users data.')",
+                f"save_chart('{title}', {{'title': '{title}', 'chart_type': 'line', 'data': rows, 'x': 'date', 'y': 'active_users'}})",
+                "RESULT = {'chart': 'Daily Active Users', 'rows': len(rows)}",
+            ]
+        )
+    if "latency" in prompt and "error_rate" in prompt:
+        title = "Latency vs Error Rate"
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = data.get('daily_metrics') if isinstance(data, dict) and 'daily_metrics' in data else to_dataframe(data, limit=None)",
+                "x_col = next((c for c in df.columns if 'latency' in str(c).lower()), None)",
+                "y_col = next((c for c in df.columns if 'error_rate' in str(c).lower() or str(c).lower() == 'error'), None)",
+                "if x_col is None or y_col is None:",
+                "    raise ValueError('Could not find latency and error_rate fields for scatter chart.')",
+                "rows = df[[x_col, y_col]].rename(columns={x_col: 'latency_ms_p95', y_col: 'error_rate'}).to_dict('records')",
+                "save_table('Latency vs error rate', rows, description='Underlying data for latency/error scatter chart.')",
+                f"save_chart('{title}', {{'title': '{title}', 'chart_type': 'scatter', 'data': rows, 'x': 'latency_ms_p95', 'y': 'error_rate'}})",
+                "RESULT = {'chart': 'Latency vs Error Rate', 'rows': len(rows)}",
+            ]
+        )
+    if "revenue" in prompt and has_country_intent:
+        title = "Revenue by Country"
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "frames = {}",
+                "for collection in find_record_collections(data, max_depth=4):",
+                "    path = collection.get('path', '')",
+                "    try:",
+                "        frames[path] = to_dataframe(get_path(data, path), limit=None)",
+                "    except Exception:",
+                "        rows_at_path = flatten_records_at_path(data, path)",
+                "        if rows_at_path:",
+                "            frames[path] = pd.DataFrame(rows_at_path)",
+                "country_frame = next((frame for frame in frames.values() if 'user_id' in frame.columns and 'country' in frame.columns), None)",
+                "revenue_frame = next((frame for frame in frames.values() if 'user_id' in frame.columns and any(('revenue' in str(c).lower() or 'total' in str(c).lower()) for c in frame.columns)), None)",
+                "if country_frame is not None and revenue_frame is not None:",
+                "    revenue_col = next(c for c in revenue_frame.columns if 'revenue' in str(c).lower() or 'total' in str(c).lower())",
+                "    df = revenue_frame.merge(country_frame[['user_id', 'country']], on='user_id', how='left')",
+                "    df[revenue_col] = pd.to_numeric(df[revenue_col], errors='coerce').fillna(0)",
+                "    grouped = df.groupby('country', dropna=False, as_index=False)[revenue_col].sum()",
+                "    grouped.columns = ['country', 'total_revenue']",
+                "    rows = grouped.sort_values('total_revenue', ascending=False).to_dict('records')",
+                "else:",
+                "    candidate_rows = []",
+                "    for collection in find_record_collections(data, max_depth=5):",
+                "        collection_rows = flatten_records_at_path(data, collection.get('path', ''))",
+                "        if collection_rows and any('country' in row for row in collection_rows):",
+                "            candidate_rows.extend(collection_rows)",
+                "    df = pd.DataFrame(candidate_rows)",
+                "    if df.empty or 'country' not in df.columns:",
+                "        df = to_dataframe(data, limit=None)",
+                "    revenue_col = next((c for c in df.columns if str(c).lower() in {'gross_revenue','total_revenue','order_total','revenue','line_total'} or 'revenue' in str(c).lower() or 'total' in str(c).lower()), None)",
+                "    if revenue_col is None or 'country' not in df.columns:",
+                "        raise ValueError('Could not find country and revenue fields in the discovered record collections.')",
+                "    df[revenue_col] = pd.to_numeric(df[revenue_col], errors='coerce').fillna(0)",
+                "    grouped = df.groupby('country', dropna=False, as_index=False)[revenue_col].sum()",
+                "    grouped.columns = ['country', 'total_revenue']",
+                "    rows = grouped.sort_values('total_revenue', ascending=False).to_dict('records')",
+                "save_table('Revenue by country', rows, description='Revenue aggregated by country from discovered records.')",
+                f"save_chart('{title}', {{'title': '{title}', 'chart_type': 'bar', 'data': rows, 'x': 'country', 'y': 'total_revenue'}})",
+                "RESULT = {'chart': 'Revenue by Country', 'rows': len(rows), 'source_row_count': len(df), 'analyzed_row_count': len(df)}",
+            ]
+        )
+    if has_country_intent and any(marker in prompt for marker in ("pie", "bar", "chart", "distribution")):
         chart_type = "pie" if "pie" in prompt else "bar"
         title = "Patent Records by Country"
         return "\n".join(
@@ -2022,7 +2099,12 @@ def _common_chart_code(message: str) -> str | None:
                 f"request_text = {request_text}",
                 "df = to_dataframe(data, limit=None)",
                 "if 'country' not in df.columns:",
-                "    raise ValueError(\"Cannot create a country chart because the active dataset has no 'country' field.\")",
+                "    rows = []",
+                "    for collection in find_record_collections(data, max_depth=5):",
+                "        rows.extend(flatten_records_at_path(data, collection.get('path', '')))",
+                "    df = pd.DataFrame(rows)",
+                "if 'country' not in df.columns:",
+                "    raise ValueError(\"Cannot create a country chart because no 'country' field was found in top-level or nested records.\")",
                 "counts = df['country'].fillna('Unknown').astype(str).value_counts().reset_index()",
                 "counts.columns = ['country', 'record_count']",
                 "counts.attrs['source_row_count'] = len(df)",
@@ -2071,6 +2153,29 @@ def _common_chart_code(message: str) -> str | None:
                 ),
             ]
         )
+    if "temperature" in prompt and ("hour" in prompt or "time" in prompt):
+        title = "Average Temperature by Hour"
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for collection in find_record_collections(data, max_depth=5):",
+                "    rows.extend(flatten_records_at_path(data, collection.get('path', '')))",
+                "df = pd.DataFrame(rows)",
+                "temp_col = next((c for c in df.columns if 'temperature' in str(c).lower()), None)",
+                "time_col = next((c for c in df.columns if 'timestamp' in str(c).lower() or 'time' in str(c).lower()), None)",
+                "if temp_col is None or time_col is None:",
+                "    raise ValueError('Could not find temperature and timestamp fields in discovered records.')",
+                "times = pd.to_datetime(df[time_col], errors='coerce')",
+                "work = pd.DataFrame({'hour': times.dt.hour, 'temperature': pd.to_numeric(df[temp_col], errors='coerce')}).dropna()",
+                "grouped = work.groupby('hour', as_index=False)['temperature'].mean()",
+                "grouped.columns = ['hour', 'average_temperature']",
+                "rows = grouped.to_dict('records')",
+                "save_table('Average temperature by hour', rows, description='Average temperature grouped by hour from discovered readings.')",
+                f"save_chart('{title}', {{'title': '{title}', 'chart_type': 'line', 'data': rows, 'x': 'hour', 'y': 'average_temperature'}})",
+                "RESULT = {'chart': 'Average Temperature by Hour', 'rows': len(rows)}",
+            ]
+        )
     if "status" in prompt:
         title = "Status Distribution"
         return "\n".join(
@@ -2098,7 +2203,32 @@ def _common_chart_code(message: str) -> str | None:
                 ),
             ]
         )
-    return None
+    title = "Dataset chart"
+    return "\n".join(
+        [
+            f"request_text = {request_text}",
+            "df = to_dataframe(data, limit=None)",
+            "numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()",
+            "metric_cols = [col for col in numeric_cols if not any(marker in str(col).lower() for marker in ('id', 'number', 'doc', 'patent', 'application'))]",
+            "label_cols = [col for col in df.columns if col not in numeric_cols]",
+            "y = metric_cols[0] if metric_cols else (numeric_cols[0] if numeric_cols else 'record_count')",
+            "x = label_cols[0] if label_cols else 'row'",
+            "if metric_cols and label_cols:",
+            "    df[y] = pd.to_numeric(df[y], errors='coerce').fillna(0)",
+            "    rows = df.groupby(x, dropna=False, as_index=False)[y].sum().head(10).to_dict('records')",
+            "else:",
+            "    rows = df.head(10).reset_index().rename(columns={'index': 'row'}).to_dict('records')",
+            "    if rows and 'record_count' not in rows[0]:",
+            "        rows = [{'row': row.get('row', index), 'record_count': 1} for index, row in enumerate(rows)]",
+            "    x, y = 'row', 'record_count'",
+            "if not rows:",
+            "    rows = [{'name': key, 'size': len(value) if hasattr(value, '__len__') else 1} for key, value in datasets.items()]",
+            "    x, y = 'name', 'size'",
+            f"save_chart('{title}', {{'title': '{title}', 'chart_type': 'bar', 'data': rows, 'x': x, 'y': y, 'description': 'Generic chart generated from the active dataset.'}})",
+            "save_table('Chart source data', rows, description='Underlying data for the chart')",
+            "RESULT = {'chart': 'Dataset chart', 'rows': len(rows)}",
+        ]
+    )
 
 
 def _common_table_export_code(message: str) -> str | None:
@@ -2130,14 +2260,173 @@ def _common_table_export_code(message: str) -> str | None:
                 "RESULT = {'csv_created': True, 'row_count': len(rows), 'state_changed': False}",
             ]
         )
-    if any(marker in prompt for marker in ("what is in this file", "what's in this file", "what does this dataset contain", "summarize this dataset")):
+    if "export" in prompt and ("top 10" in prompt or "top-10" in prompt):
         return "\n".join(
             [
                 f"request_text = {request_text}",
                 "df = to_dataframe(data, limit=None)",
-                "fields = [str(column) for column in df.columns.tolist()]",
-                "sample_records = df.head(3).to_dict('records')",
-                "RESULT = {'object_type': type(data).__name__, 'length': len(data) if hasattr(data, '__len__') else None, 'representative_fields': fields, 'sample_records': sample_records, 'source_row_count': len(df), 'analyzed_row_count': len(df)}",
+                "if 'country' in df.columns:",
+                "    table = df['country'].fillna('Unknown').astype(str).value_counts().head(10).reset_index()",
+                "    table.columns = ['country', 'record_count']",
+                "    rows = table.to_dict('records')",
+                "else:",
+                "    rows = df.head(10).to_dict('records')",
+                "save_csv('Top 10 export', rows=rows)",
+                "RESULT = {'csv_created': True, 'row_count': len(rows), 'state_changed': False}",
+            ]
+        )
+    if "export" in prompt and "alert" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = flatten_records_at_path(data, 'alerts') or flatten_records_at_path(data, 'sensors.readings.alerts')",
+                "columns = ['sensor_id', 'timestamp', 'alert_type', 'severity', 'value']",
+                "export_rows = [{key: row.get(key) for key in columns} for row in rows]",
+                "save_csv('alerts_export.csv', rows=export_rows)",
+                "RESULT = {'csv_created': True, 'row_count': len(export_rows), 'columns': columns, 'state_changed': False}",
+            ]
+        )
+    if "export" in prompt and "risk flag" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = flatten_records_at_path(data, 'risk_flags') or flatten_records_at_path(data, 'customers.events.risk_flags')",
+                "columns = ['customer_id', 'event_id', 'flag_type', 'severity']",
+                "export_rows = [{key: row.get(key) for key in columns} for row in rows]",
+                "save_csv('Risk Flags Export', rows=export_rows)",
+                "RESULT = {'csv_created': True, 'row_count': len(export_rows), 'columns': columns, 'state_changed': False}",
+            ]
+        )
+    if "top-level element" in prompt and "type" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "items = data if isinstance(data, list) else list(data.values()) if isinstance(data, dict) else [data]",
+                "rows = []",
+                "for i, item in enumerate(items):",
+                "    info = inspect_object(item, max_depth=1)",
+                "    rows.append({'element_index': i, 'type': info.get('type'), 'structure': info.get('kind'), 'shape': info.get('shape'), 'length': info.get('length')})",
+                "save_table('Top-level element types', rows, description='Each top-level element and its type.')",
+                "RESULT = {'object_type': type(data).__name__, 'length': len(items), 'top_level_elements': rows}",
+            ]
+        )
+    if "nested records" in prompt and "field" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for collection in find_record_collections(data, max_depth=5):",
+                "    rows.append({'record_path': collection.get('path'), 'record_kind': collection.get('kind'), 'record_count': collection.get('count'), 'common_fields': ', '.join([str(field) for field in collection.get('fields', [])[:20]])})",
+                "save_table('Nested record collections and fields', rows, description='Detected nested record collections and their common fields.')",
+                "RESULT = {'record_collections': rows, 'field_count': sum(len(str(row.get('common_fields') or '').split(',')) for row in rows)}",
+            ]
+        )
+    if "join key" in prompt or "join keys" in prompt or "possible join" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for name, obj in datasets.items():",
+                "    summary = summarize_structure(obj)",
+                "    fields = []",
+                "    for collection in summary.get('record_collections_detected', []):",
+                "        fields.extend(collection.get('fields', []) if isinstance(collection, dict) else [])",
+                "    key_like = []",
+                "    for field in fields:",
+                "        lowered = str(field).lower()",
+                "        if lowered == 'id' or lowered.endswith('_id') or lowered.endswith('_key') or lowered in {'customer_id', 'user_id', 'sensor_id', 'event_id'}:",
+                "            key_like.append(str(field))",
+                "    rows.append({'dataset_name': name, 'candidate_join_keys': ', '.join(sorted(set(key_like))) or 'none detected', 'record_collections': ', '.join([str(c.get('path')) for c in summary.get('record_collections_detected', [])[:4] if isinstance(c, dict)])})",
+                "save_table('Possible join keys', rows, description='Key-like fields detected in each uploaded dataset. No join was performed.')",
+                "RESULT = {'join_key_candidates': rows, 'state_changed': False, 'note': 'No join was performed.'}",
+            ]
+        )
+    if any(marker in prompt for marker in ("what is in this file", "what's in this file", "what does this dataset contain", "summarize this dataset", "explain the structure", "top-level keys", "object types")):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "RESULT = summarize_structure(data)",
+            ]
+        )
+    if "schema" in prompt and ("scalar" in prompt or "date" in prompt or "list" in prompt):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = to_dataframe(data, limit=None)",
+                "scalar_fields = []",
+                "date_fields = []",
+                "list_fields = []",
+                "numeric_fields = []",
+                "boolean_fields = []",
+                "for col in df.columns:",
+                "    values = [v for v in df[col].dropna().head(50).tolist()]",
+                "    if not values:",
+                "        continue",
+                "    if any(isinstance(v, (list, tuple, set)) for v in values):",
+                "        list_fields.append(str(col)); continue",
+                "    converted = pd.to_datetime(df[col], errors='coerce')",
+                "    if converted.notna().sum() >= max(1, min(5, len(values)) // 2) and ('date' in str(col).lower() or 'time' in str(col).lower() or str(col).lower().endswith('_at')):",
+                "        date_fields.append(str(col)); continue",
+                "    if pd.api.types.is_bool_dtype(df[col]):",
+                "        boolean_fields.append(str(col)); continue",
+                "    if pd.api.types.is_numeric_dtype(df[col]):",
+                "        numeric_fields.append(str(col)); continue",
+                "    scalar_fields.append(str(col))",
+                "RESULT = {'scalar_fields': scalar_fields, 'date_fields': date_fields, 'list_fields': list_fields, 'numeric_fields': numeric_fields, 'boolean_fields': boolean_fields, 'all_fields': [str(c) for c in df.columns]}",
+            ]
+        )
+    if all(field in prompt for field in ("customer_id", "country", "segment", "joined_at", "churn_risk")):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for row in flatten_records_at_path(data, 'customers') or objects_to_records(get_path(data, 'customers')):",
+                "    rows.append({key: row.get(key) for key in ['customer_id', 'country', 'segment', 'joined_at', 'churn_risk']})",
+                "save_table('Customer preview', rows[:50], description='Customer-level preview with requested fields.')",
+                "RESULT = {'columns': ['customer_id', 'country', 'segment', 'joined_at', 'churn_risk'], 'rows': rows[:5], 'preview_row_count': min(5, len(rows)), 'source_total_row_count': len(rows)}",
+            ]
+        )
+    if all(field in prompt for field in ("sensor_id", "timestamp", "site", "zone", "temperature_c", "vibration_g", "battery_pct")):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = flatten_records_at_path(data, 'readings')",
+                "if not rows:",
+                "    rows = flatten_records_at_path(data, 'sensors.readings')",
+                "columns = ['sensor_id', 'timestamp', 'site', 'zone', 'temperature_c', 'vibration_g', 'battery_pct']",
+                "table_rows = [{key: row.get(key) for key in columns} for row in rows]",
+                "save_table('Sensor readings', table_rows, description='Normalized sensor readings with requested fields.')",
+                "RESULT = {'columns': columns, 'rows': table_rows[:5], 'source_total_row_count': len(table_rows)}",
+            ]
+        )
+    if "high vibration" in prompt and "table" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = flatten_records_at_path(data, 'readings') or flatten_records_at_path(data, 'sensors.readings')",
+                "table_rows = []",
+                "for row in rows:",
+                "    alerts = row.get('alerts') or []",
+                "    has_alert = False",
+                "    severities = []",
+                "    for alert in alerts if isinstance(alerts, list) else []:",
+                "        alert_type = str(alert.get('alert_type') or alert.get('type') or '').lower() if isinstance(alert, dict) else str(alert).lower()",
+                "        if 'vibration' in alert_type:",
+                "            has_alert = True",
+                "            if isinstance(alert, dict): severities.append(str(alert.get('severity') or ''))",
+                "    if has_alert or float(row.get('vibration_g') or 0) >= 0.3:",
+                "        table_rows.append({'sensor_id': row.get('sensor_id'), 'site': row.get('site'), 'zone': row.get('zone'), 'timestamp': row.get('timestamp'), 'vibration_g': row.get('vibration_g'), 'alert_type': 'vibration', 'severity': ', '.join([s for s in severities if s])})",
+                "save_table('Sensors with high vibration alerts', table_rows, description='Readings with vibration alerts or high vibration values.')",
+                "RESULT = {'columns': list(table_rows[0].keys()) if table_rows else [], 'rows': table_rows[:5], 'row_count': len(table_rows)}",
+            ]
+        )
+    if "user_embedding_matrix" in prompt or ("embedding" in prompt and "shape" in prompt):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "matrix = data.get('user_embedding_matrix') if isinstance(data, dict) else get_path(data, 'user_embedding_matrix')",
+                "arr = np.asarray(matrix)",
+                "RESULT = {'object': 'user_embedding_matrix', 'shape': list(arr.shape), 'mean': float(np.nanmean(arr)), 'std': float(np.nanstd(arr)), 'min': float(np.nanmin(arr)), 'max': float(np.nanmax(arr))}",
             ]
         )
     if "filing date range" in prompt or "filings by year" in prompt:
@@ -2170,6 +2459,93 @@ def _common_table_export_code(message: str) -> str | None:
                 "preview_df.attrs['is_preview'] = True",
                 "save_table('Tabular preview (first 5 rows)', preview_df, description='First 5 rows with inferred columns.')",
                 "RESULT = {'columns': list(df.columns), 'rows': preview_df.to_dict('records'), 'source_total_row_count': len(df), 'preview_row_count': len(preview_df), 'is_preview': True}",
+            ]
+        )
+    if "preview" in prompt and " with " in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "requested = []",
+                "tail = request_text.split(' with ', 1)[1] if ' with ' in request_text else request_text",
+                "for raw in tail.replace('.', '').replace(' and ', ',').split(','):",
+                "    name = raw.strip().split()[0] if raw.strip() else ''",
+                "    if name and '_' in name or name in {'country', 'segment', 'status'}:",
+                "        requested.append(name)",
+                "rows = []",
+                "for collection in find_record_collections(data, max_depth=5):",
+                "    collection_rows = flatten_records_at_path(data, collection.get('path', ''))",
+                "    if not collection_rows:",
+                "        continue",
+                "    score = sum(1 for field in requested if field in collection_rows[0])",
+                "    if score >= max(1, len(requested) // 2):",
+                "        rows = collection_rows[:5]",
+                "        break",
+                "if not rows:",
+                "    rows = to_dataframe(data, limit=None).head(5).to_dict('records')",
+                "save_table('Requested preview', rows, description='Preview rows matching the requested fields where possible.')",
+                "RESULT = {'columns': list(rows[0].keys()) if rows else [], 'rows': rows, 'preview_row_count': len(rows), 'is_preview': True}",
+            ]
+        )
+    if "paid" in prompt and "refunded" in prompt and "category" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "frames = []",
+                "for collection in find_record_collections(data, max_depth=4):",
+                "    try:",
+                "        frame = to_dataframe(get_path(data, collection.get('path','')), limit=None)",
+                "    except Exception:",
+                "        frame = pd.DataFrame(flatten_records_at_path(data, collection.get('path','')))",
+                "    if {'status', 'category'} <= set(frame.columns):",
+                "        frames.append(frame)",
+                "if not frames:",
+                "    raise ValueError('Could not find records with status and category fields.')",
+                "df = frames[0]",
+                "value_col = next((c for c in df.columns if 'revenue' in str(c).lower() or 'total' in str(c).lower()), None)",
+                "if value_col:",
+                "    table = df.groupby(['category', 'status'], dropna=False, as_index=False)[value_col].sum()",
+                "else:",
+                "    table = df.groupby(['category', 'status'], dropna=False).size().reset_index(name='count')",
+                "save_table('Order status by category', table, description='Paid versus refunded orders by product category.')",
+                "RESULT = {'columns': list(table.columns), 'rows': table.to_dict('records')}",
+            ]
+        )
+    if "list all datasets" in prompt or "compare the uploaded datasets" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for name, obj in datasets.items():",
+                "    summary = summarize_structure(obj)",
+                "    rows.append({'dataset_name': name, 'object_type': summary.get('object_type'), 'row_count_or_length': summary.get('length') or (summary.get('likely_primary_records') or [{}])[0].get('count'), 'schema_style': 'tables/arrays' if summary.get('tables_detected') or summary.get('arrays_detected') else 'nested/custom/mixed', 'key_fields': ', '.join((summary.get('field_groups') or {}).get('identifier', [])[:8]), 'tables_detected': ', '.join([x.get('path','') for x in summary.get('tables_detected', [])]), 'arrays_detected': ', '.join([x.get('path','') for x in summary.get('arrays_detected', [])]), 'record_collections_detected': ', '.join([x.get('path','') for x in summary.get('record_collections_detected', [])[:5]]), 'active': obj is data})",
+                "save_table('Dataset comparison', rows, description='Object type, size, and structural summary for each dataset in the session.')",
+                "RESULT = {'datasets': rows}",
+            ]
+        )
+    if "list all tables and arrays" in prompt or "tables and arrays with their shapes" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "summary = summarize_structure(data)",
+                "rows = []",
+                "for item in summary.get('tables_detected', []):",
+                "    rows.append({'name': item.get('path'), 'path': item.get('path'), 'kind': 'table', 'type': item.get('kind'), 'shape': item.get('shape')})",
+                "for item in summary.get('arrays_detected', []):",
+                "    rows.append({'name': item.get('path'), 'path': item.get('path'), 'kind': 'array', 'type': item.get('type'), 'shape': item.get('shape')})",
+                "save_table('Tables and arrays', rows, description='Detected tabular and ndarray-like objects with shapes.')",
+                "RESULT = {'tables_and_arrays': rows}",
+            ]
+        )
+    if "element type" in prompt and "summary table" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for i, item in enumerate(data if isinstance(data, list) else list(data) if hasattr(data, '__iter__') and not isinstance(data, dict) else [data]):",
+                "    info = inspect_object(item, max_depth=1)",
+                "    rows.append({'element_index': i, 'type': info.get('type'), 'structure': info.get('kind'), 'shape': info.get('shape'), 'length': info.get('length')})",
+                "save_table('Top-level element types', rows, description='Summary of each top-level element and its type.')",
+                "RESULT = {'elements': rows}",
             ]
         )
     return None
@@ -2326,10 +2702,12 @@ def _fake_chart_code(prompt: str = "") -> str:
             "    x, y, title = 'country', 'record_count', 'Patent records by country'",
             "else:",
             "    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()",
+            "    metric_cols = [col for col in numeric_cols if not any(marker in str(col).lower() for marker in ('id', 'number', 'doc', 'patent', 'application'))]",
             "    label_cols = [col for col in df.columns if col not in numeric_cols]",
-            "    y = numeric_cols[0] if numeric_cols else 'record_count'",
+            "    y = metric_cols[0] if metric_cols else (numeric_cols[0] if numeric_cols else 'record_count')",
             "    x = label_cols[0] if label_cols else 'row'",
-            "    if numeric_cols and label_cols:",
+            "    if metric_cols and label_cols:",
+            "        df[y] = pd.to_numeric(df[y], errors='coerce').fillna(0)",
             "        rows = df.groupby(x, dropna=False, as_index=False)[y].sum().head(10).to_dict('records')",
             "    else:",
             "        rows = df.head(10).reset_index().rename(columns={'index': 'row'}).to_dict('records')",

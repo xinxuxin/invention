@@ -356,6 +356,8 @@ def merge_verification_results(
 
 
 def asks_for_table(message: str) -> bool:
+    if "list all" in message and not any(marker in message for marker in ("table", "tabular", "rows", "preview", "with shapes")):
+        return False
     return any(marker in message for marker in TABLE_MARKERS)
 
 
@@ -532,6 +534,8 @@ def _schema_artifact_has_domain_groups(artifacts: Sequence[ExecutionArtifact]) -
 
 
 def _asks_for_schema_groups(message: str) -> bool:
+    if "schema style" in message:
+        return False
     return "schema" in message or "scalar" in message or "date fields" in message or "list-like" in message
 
 
@@ -546,6 +550,8 @@ def _inspection_size_missing(
         return False
     preview = result.result_preview if result else None
     if isinstance(preview, Mapping):
+        if any(key in preview for key in ("top_level_keys", "top_level_items", "record_collections_detected", "tables_detected", "arrays_detected", "custom_objects_detected")):
+            return False
         for key in (
             "length",
             "object_length",
@@ -567,7 +573,7 @@ def _schema_domain_fields(value: Any) -> set[str]:
     fields: set[str] = set()
     if isinstance(value, Mapping):
         for key, item in value.items():
-            if str(key).endswith("_fields") and isinstance(item, list):
+            if (str(key).endswith("_fields") or str(key) in {"scalars", "dates", "lists", "all_fields"}) and isinstance(item, list):
                 fields.update(str(field) for field in item)
             elif isinstance(item, Mapping | list):  # type: ignore[operator]
                 fields.update(_schema_domain_fields(item))
@@ -702,7 +708,7 @@ def _intent_retry_instruction(message: str) -> str:
             "Create a line chart artifact matching the requested domain. For filings by year, use "
             "chart_type='line', x='filing_year', y='filing_count', and non-empty yearly data."
         )
-    if "country" in message:
+    if "country" in message or "countries" in message:
         return "Create a country-count artifact with country and record_count/count fields."
     return "Create artifacts whose columns, chart fields, title, and result preview match the user request."
 
@@ -834,7 +840,7 @@ def _chart_intent_issue(message: str, artifact: ExecutionArtifact) -> str | None
             return "Filings-by-year chart does not use a filing_count/count y field."
         if "country" in row_keys and "filing_year" not in row_keys and "year" not in row_keys:
             return "Filings-by-year chart appears to contain country counts instead of yearly filings."
-    if "country" in message:
+    if "country" in message or "countries" in message:
         if x != "country" and "country" not in row_keys:
             return "Country chart does not use country as a data field."
     return None

@@ -710,7 +710,8 @@ def _run_structured_check(
 ) -> tuple[bool, str]:
     if "must_contain" in check:
         terms = [str(term).lower() for term in check["must_contain"]]
-        return _ok(all(term in answer.lower() for term in terms), f"Answer missing required terms: {terms}")
+        blob = _answer_artifact_blob(answer, artifacts, artifact_contents)
+        return _ok(all(term in blob for term in terms), f"Answer/artifacts missing required terms: {terms}")
     if "must_not_contain" in check:
         terms = [str(term) for term in check["must_not_contain"]]
         blob = answer + json.dumps(events, ensure_ascii=False, default=str)
@@ -718,7 +719,8 @@ def _run_structured_check(
         return _ok(not found, f"Forbidden terms found: {found}")
     if "any_of" in check:
         terms = [str(term).lower() for term in check["any_of"]]
-        return _ok(any(term in answer.lower() for term in terms), f"Answer missing any of: {terms}")
+        blob = _answer_artifact_blob(answer, artifacts, artifact_contents)
+        return _ok(any(term in blob for term in terms), f"Answer/artifacts missing any of: {terms}")
     if "regex" in check:
         pattern = str(check["regex"])
         return _ok(bool(re.search(pattern, answer, re.IGNORECASE)), f"Answer failed regex: {pattern}")
@@ -763,6 +765,16 @@ def _run_structured_check(
 
 def _ok(condition: bool, reason: str) -> tuple[bool, str]:
     return condition, "" if condition else reason
+
+
+def _answer_artifact_blob(answer: str, artifacts: list[dict[str, Any]], artifact_contents: dict[str, Any]) -> str:
+    return (
+        answer
+        + "\n"
+        + json.dumps(artifacts, ensure_ascii=False, default=str)
+        + "\n"
+        + json.dumps(artifact_contents, ensure_ascii=False, default=str)
+    ).lower()
 
 
 def _run_special_check(
@@ -1260,9 +1272,28 @@ def _any_table_has_columns(
 ) -> bool:
     for document in _table_documents(artifacts, artifact_contents):
         keys = _table_keys(document)
-        if len(keys & {key.lower() for key in required}) >= min_matches:
+        expanded = _expand_column_aliases(keys)
+        required_expanded = {key.lower() for key in required}
+        if len(expanded & required_expanded) >= min_matches:
             return True
     return False
+
+
+def _expand_column_aliases(keys: set[str]) -> set[str]:
+    expanded = set(keys)
+    aliases = {
+        "index": "element_index",
+        "element": "element_index",
+        "record_count": "count",
+        "patent_count": "count",
+        "filing_count": "count",
+        "gross_revenue": "revenue",
+        "total_revenue": "revenue",
+    }
+    for source, alias in aliases.items():
+        if source in keys:
+            expanded.add(alias)
+    return expanded
 
 
 def _any_count_column(artifacts: list[dict[str, Any]], artifact_contents: dict[str, Any]) -> bool:

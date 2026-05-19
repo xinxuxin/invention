@@ -12,8 +12,9 @@ import socket
 import statistics
 import traceback as traceback_module
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from queue import Empty
 from typing import Any
@@ -529,6 +530,11 @@ def _child_execute(
         "objects_to_records": objects_to_records,
         "to_dataframe": to_dataframe,
         "preview_dataframe": preview_dataframe,
+        "inspect_object": inspect_object,
+        "summarize_structure": summarize_structure,
+        "find_record_collections": find_record_collections,
+        "get_path": get_path,
+        "flatten_records_at_path": flatten_records_at_path,
     }
 
     _block_network()
@@ -593,7 +599,10 @@ def _execution_result_value(namespace: Mapping[str, Any], preview_value: Any, pr
 def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
     def save_table(*args: Any, description: str | None = None, **kwargs: Any) -> dict[str, str]:
         kw_name = kwargs.pop("name", None)
-        kw_data = kwargs.pop("data", kwargs.pop("dataframe_or_records", None))
+        kw_data = kwargs.pop(
+            "data",
+            kwargs.pop("rows", kwargs.pop("dataframe", kwargs.pop("dataframe_or_records", None))),
+        )
         if kwargs:
             raise ValueError(f"save_table got unsupported keyword argument(s): {', '.join(sorted(kwargs))}")
 
@@ -674,12 +683,18 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
 
     def save_csv(*args: Any, **kwargs: Any) -> dict[str, str]:
         kw_name = kwargs.pop("name", None)
-        kw_data = kwargs.pop("data", kwargs.pop("dataframe_or_records", None))
+        kw_data = kwargs.pop(
+            "data",
+            kwargs.pop("rows", kwargs.pop("dataframe", kwargs.pop("dataframe_or_records", None))),
+        )
         if kwargs:
             raise ValueError(f"save_csv got unsupported keyword argument(s): {', '.join(sorted(kwargs))}")
         if len(args) >= 2:
             name = str(args[0])
             dataframe_or_records = args[1]
+        elif len(args) == 1 and kw_name is not None and kw_data is None:
+            name = str(kw_name)
+            dataframe_or_records = args[0]
         elif len(args) == 1 and kw_data is not None:
             name = str(args[0])
             dataframe_or_records = kw_data
@@ -879,6 +894,499 @@ def preview_dataframe(obj: Any, limit: int = MAX_PREVIEW_ROWS) -> pd.DataFrame:
     frame.attrs["preview_row_count"] = preview_count
     frame.attrs["is_preview"] = True
     return frame
+
+
+def inspect_object(obj: Any, max_depth: int = 3, max_items: int = 5) -> dict[str, Any]:
+    """Return a compact JSON-safe structural summary for arbitrary Python objects."""
+    summary = _inspect_object(obj, path="", depth=0, max_depth=max_depth, max_items=max_items)
+    if isinstance(summary, dict):
+        summary["possible_record_collections"] = find_record_collections(obj, max_depth=max_depth + 1)[:20]
+    return summary
+
+
+def summarize_structure(obj: Any) -> dict[str, Any]:
+    inspected = inspect_object(obj, max_depth=3, max_items=5)
+    collections = find_record_collections(obj, max_depth=4)
+    tables = [item for item in collections if item.get("kind") == "dataframe"]
+    arrays = _array_summaries(obj)
+    custom_objects = _custom_object_summaries(obj)
+    return {
+        "object_type": inspected.get("type"),
+        "length": inspected.get("length"),
+        "top_level_keys": inspected.get("keys", []),
+        "top_level_items": inspected.get("item_types", []),
+        "tables_detected": [_compact_collection_summary(item) for item in tables],
+        "arrays_detected": arrays,
+        "record_collections_detected": [_compact_collection_summary(item) for item in collections],
+        "custom_objects_detected": custom_objects,
+        "likely_primary_records": [_compact_collection_summary(item) for item in _likely_primary_records(collections)],
+        "field_groups": _field_groups_from_collections(collections),
+    }
+
+
+def find_record_collections(obj: Any, max_depth: int = 4) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    _find_record_collections(obj, path="", depth=0, max_depth=max_depth, found=found, seen=seen)
+    return _dedupe_collection_summaries(found)
+
+
+def get_path(obj: Any, path: str) -> Any:
+    value: Any = obj
+    for token in _path_tokens(path):
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            value = [_get_child(item, token) for item in value]
+            value = [item for item in value if item is not _MISSING]
+        else:
+            value = _get_child(value, token)
+        if value is _MISSING:
+            raise KeyError(f"Path not found: {path}")
+    return value
+
+
+def flatten_records_at_path(obj: Any, path: str, parent_fields: Sequence[str] | None = None) -> list[dict[str, Any]]:
+    tokens = _path_tokens(path)
+    if not tokens:
+        return objects_to_records(obj, limit=None)
+    rows: list[dict[str, Any]] = []
+    _flatten_path(obj, tokens, parent={}, rows=rows, parent_fields=set(parent_fields or []))
+    if rows:
+        return rows
+
+    # Helpful fallback: allow "readings" to match "sensors.readings".
+    for collection in find_record_collections(obj, max_depth=5):
+        collection_path = str(collection.get("path") or "")
+        if collection_path == path or collection_path.endswith(f".{path}"):
+            try:
+                return flatten_records_at_path(obj, collection_path, parent_fields=parent_fields)
+            except Exception:
+                continue
+    return rows
+
+
+class _Missing:
+    pass
+
+
+_MISSING = _Missing()
+
+
+def _inspect_object(obj: Any, *, path: str, depth: int, max_depth: int, max_items: int) -> dict[str, Any]:
+    summary: dict[str, Any] = {"path": path, "type": type(obj).__name__, "module": type(obj).__module__}
+    length = _safe_len(obj)
+    if length is not None:
+        summary["length"] = length
+
+    if isinstance(obj, pd.DataFrame):
+        summary.update(
+            {
+                "kind": "dataframe",
+                "shape": [int(obj.shape[0]), int(obj.shape[1])],
+                "columns": [str(column) for column in obj.columns.tolist()],
+                "dtypes": {str(column): str(dtype) for column, dtype in obj.dtypes.items()},
+                "sample": _json_safe(obj.head(max_items).to_dict(orient="records"), max_items=max_items),
+            }
+        )
+        return summary
+
+    if isinstance(obj, pd.Series):
+        summary.update({"kind": "series", "shape": [int(len(obj))], "dtype": str(obj.dtype)})
+        return summary
+
+    if isinstance(obj, np.ndarray):
+        summary.update(
+            {
+                "kind": "ndarray",
+                "shape": [int(item) for item in obj.shape],
+                "dtype": str(obj.dtype),
+                "sample": _json_safe(obj.reshape(-1)[:max_items].tolist(), max_items=max_items),
+            }
+        )
+        return summary
+
+    if depth >= max_depth:
+        summary["sample"] = _json_safe(obj, max_depth=1, max_items=max_items)
+        return summary
+
+    if isinstance(obj, Mapping):
+        keys = [str(key) for key in list(obj.keys())[:max_items]]
+        summary["kind"] = "dict"
+        summary["keys"] = keys
+        summary["children"] = [
+            _inspect_object(value, path=_join_path(path, str(key)), depth=depth + 1, max_depth=max_depth, max_items=max_items)
+            for key, value in list(obj.items())[:max_items]
+        ]
+        return summary
+
+    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+        items = list(obj[:max_items]) if isinstance(obj, (list, tuple)) else list(obj)[:max_items]
+        summary["kind"] = "sequence"
+        summary["item_types"] = _item_type_counts(items)
+        summary["sample"] = _json_safe(items, max_depth=2, max_items=max_items)
+        if items:
+            summary["children"] = [
+                _inspect_object(item, path=f"{path}[{index}]" if path else f"[{index}]", depth=depth + 1, max_depth=max_depth, max_items=max_items)
+                for index, item in enumerate(items[:max_items])
+            ]
+        return summary
+
+    attrs = _public_attrs(obj)
+    if attrs:
+        summary["kind"] = "custom_object"
+        summary["attrs"] = list(attrs.keys())[:max_items]
+        summary["children"] = [
+            _inspect_object(value, path=_join_path(path, key), depth=depth + 1, max_depth=max_depth, max_items=max_items)
+            for key, value in list(attrs.items())[:max_items]
+        ]
+        return summary
+
+    summary["sample"] = _json_safe(obj, max_depth=1, max_items=max_items)
+    return summary
+
+
+def _find_record_collections(
+    obj: Any,
+    *,
+    path: str,
+    depth: int,
+    max_depth: int,
+    found: list[dict[str, Any]],
+    seen: set[int],
+) -> None:
+    if depth > max_depth:
+        return
+    object_id = id(obj)
+    if object_id in seen:
+        return
+    seen.add(object_id)
+
+    if isinstance(obj, pd.DataFrame):
+        found.append(
+            {
+                "path": path or "<root>",
+                "kind": "dataframe",
+                "count": int(len(obj)),
+                "fields": [str(column) for column in obj.columns.tolist()],
+                "shape": [int(obj.shape[0]), int(obj.shape[1])],
+                "sample": _json_safe(obj.head(3).to_dict(orient="records"), max_items=3),
+            }
+        )
+        return
+
+    if _is_record_sequence(obj):
+        records = objects_to_records(obj, limit=5)
+        fields = _fields_from_records(records)
+        found.append(
+            {
+                "path": path or "<root>",
+                "kind": _record_sequence_kind(obj),
+                "count": _safe_len(obj) or len(records),
+                "fields": fields,
+                "sample": _json_safe(records[:3], max_items=3),
+            }
+        )
+
+    if isinstance(obj, Mapping):
+        for key, value in obj.items():
+            _find_record_collections(value, path=_join_path(path, str(key)), depth=depth + 1, max_depth=max_depth, found=found, seen=seen)
+        return
+
+    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+        for item in list(obj)[:MAX_PREVIEW_ITEMS]:
+            attrs = safe_attrs(item)
+            if attrs.keys() == {"repr"}:
+                continue
+            for key, value in attrs.items():
+                if _looks_like_collection(value):
+                    _find_record_collections(value, path=_join_path(path, str(key)), depth=depth + 1, max_depth=max_depth, found=found, seen=seen)
+        return
+
+    attrs = _public_attrs(obj)
+    for key, value in attrs.items():
+        if _looks_like_collection(value):
+            _find_record_collections(value, path=_join_path(path, key), depth=depth + 1, max_depth=max_depth, found=found, seen=seen)
+
+
+def _flatten_path(
+    value: Any,
+    tokens: list[str],
+    *,
+    parent: dict[str, Any],
+    rows: list[dict[str, Any]],
+    parent_fields: set[str],
+) -> None:
+    if not tokens:
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            for item in value:
+                record = _flatten_record_leaves(object_to_record(item))
+                rows.append({**parent, **record})
+        else:
+            rows.append({**parent, **_flatten_record_leaves(object_to_record(value))})
+        return
+
+    token = tokens[0]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            _flatten_path(item, tokens, parent=_parent_record(parent, item, parent_fields), rows=rows, parent_fields=parent_fields)
+        return
+
+    child = _get_child(value, token)
+    if child is _MISSING:
+        return
+    _flatten_path(child, tokens[1:], parent=_parent_record(parent, value, parent_fields), rows=rows, parent_fields=parent_fields)
+
+
+def _parent_record(parent: dict[str, Any], value: Any, parent_fields: set[str]) -> dict[str, Any]:
+    record = _flatten_record_leaves(object_to_record(value))
+    output = dict(parent)
+    useful_keys = parent_fields or {
+        key
+        for key in record
+        if key.endswith("_id")
+        or key
+        in {
+            "id",
+            "customer_id",
+            "event_id",
+            "sensor_id",
+            "timestamp",
+            "country",
+            "site",
+            "zone",
+            "segment",
+            "joined_at",
+            "churn_risk",
+        }
+    }
+    for key in useful_keys:
+        if key in record and key not in output:
+            output[key] = record[key]
+    return output
+
+
+def _flatten_record_leaves(record: Mapping[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+
+    def add(key: str, value: Any, prefix: str = "") -> None:
+        if isinstance(value, Mapping):
+            for child_key, child_value in value.items():
+                add(str(child_key), child_value, f"{prefix}{key}_" if prefix or key else "")
+            return
+        final_key = key
+        if final_key in output:
+            final_key = f"{prefix}{key}".strip("_") or key
+        output[final_key] = value
+
+    for key, value in record.items():
+        add(str(key), value)
+    return output
+
+
+def _path_tokens(path: str) -> list[str]:
+    return [part.replace("[]", "").strip() for part in path.split(".") if part.replace("[]", "").strip()]
+
+
+def _get_child(value: Any, token: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(token, _MISSING)
+    attrs = _public_attrs(value)
+    if token in attrs:
+        return attrs[token]
+    return _MISSING
+
+
+def _public_attrs(obj: Any) -> dict[str, Any]:
+    if isinstance(obj, Mapping):
+        return dict(obj)
+    if is_dataclass(obj) and not isinstance(obj, type):
+        try:
+            return asdict(obj)
+        except Exception:
+            pass
+    attrs = safe_attrs(obj)
+    if attrs.keys() != {"repr"}:
+        return {str(key): value for key, value in attrs.items() if not str(key).startswith("_")}
+    return {}
+
+
+def _is_record_sequence(obj: Any) -> bool:
+    if not isinstance(obj, Sequence) or isinstance(obj, (str, bytes, bytearray)):
+        return False
+    if not obj:
+        return False
+    sample = list(obj)[:5]
+    records = [object_to_record(item) for item in sample]
+    return any(record.keys() != {"repr"} and len(record) >= 2 for record in records)
+
+
+def _record_sequence_kind(obj: Any) -> str:
+    sample = list(obj)[:5]
+    if all(isinstance(item, Mapping) for item in sample):
+        return "list[dict]"
+    if all(is_dataclass(item) for item in sample):
+        return "list[dataclass]"
+    return "list[object]"
+
+
+def _looks_like_collection(value: Any) -> bool:
+    return isinstance(value, (pd.DataFrame, pd.Series, np.ndarray, Mapping, list, tuple))
+
+
+def _fields_from_records(records: Sequence[Mapping[str, Any]]) -> list[str]:
+    fields: list[str] = []
+    for record in records:
+        for key in record:
+            if key not in fields and not str(key).startswith("__"):
+                fields.append(str(key))
+    return fields
+
+
+def _item_type_counts(items: Sequence[Any]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for item in items:
+        key = type(item).__name__
+        counts[key] = counts.get(key, 0) + 1
+    return [{"type": key, "count": value} for key, value in counts.items()]
+
+
+def _safe_len(value: Any) -> int | None:
+    try:
+        return int(len(value))  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+def _join_path(prefix: str, key: str) -> str:
+    if not prefix or prefix == "<root>":
+        return key
+    return f"{prefix}.{key}"
+
+
+def _dedupe_collection_summaries(collections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str]] = set()
+    output: list[dict[str, Any]] = []
+    for item in collections:
+        key = (str(item.get("path")), str(item.get("kind")))
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
+
+
+def _array_summaries(obj: Any) -> list[dict[str, Any]]:
+    arrays: list[dict[str, Any]] = []
+
+    def visit(value: Any, path: str, depth: int) -> None:
+        if depth > 3:
+            return
+        if isinstance(value, np.ndarray):
+            arrays.append({"path": path or "<root>", "type": "ndarray", "shape": [int(item) for item in value.shape], "dtype": str(value.dtype)})
+            return
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                visit(child, _join_path(path, str(key)), depth + 1)
+        else:
+            for key, child in _public_attrs(value).items():
+                visit(child, _join_path(path, key), depth + 1)
+
+    visit(obj, "", 0)
+    return arrays
+
+
+def _custom_object_summaries(obj: Any) -> list[dict[str, Any]]:
+    custom: list[dict[str, Any]] = []
+
+    def visit(value: Any, path: str, depth: int) -> None:
+        if depth > 3:
+            return
+        if _is_custom_object(value):
+            attrs = _public_attrs(value)
+            custom.append({"path": path or "<root>", "type": type(value).__name__, "fields": list(attrs.keys())[:20]})
+            for key, child in attrs.items():
+                visit(child, _join_path(path, key), depth + 1)
+        elif isinstance(value, Mapping):
+            for key, child in value.items():
+                visit(child, _join_path(path, str(key)), depth + 1)
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            for item in list(value)[:5]:
+                visit(item, path, depth + 1)
+
+    visit(obj, "", 0)
+    return custom
+
+
+def _is_custom_object(value: Any) -> bool:
+    return not isinstance(
+        value,
+        (
+            str,
+            bytes,
+            bytearray,
+            int,
+            float,
+            bool,
+            type(None),
+            datetime,
+            date,
+            Mapping,
+            list,
+            tuple,
+            set,
+            pd.DataFrame,
+            pd.Series,
+            np.ndarray,
+        ),
+    )
+
+
+def _compact_collection_summary(item: Mapping[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in ("path", "kind", "count", "fields", "shape"):
+        if key in item:
+            value = item[key]
+            if key == "fields" and isinstance(value, list):
+                compact[key] = [str(field) for field in value[:40]]
+            else:
+                compact[key] = value
+    sample = item.get("sample")
+    if isinstance(sample, list) and sample and isinstance(sample[0], Mapping):
+        compact["sample_fields"] = list(sample[0].keys())[:20]
+    return compact
+
+
+def _likely_primary_records(collections: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(collections, key=lambda item: int(item.get("count") or 0), reverse=True)
+    return [dict(item) for item in ranked[:3]]
+
+
+def _field_groups_from_collections(collections: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
+    groups = {"identifier": [], "date": [], "list_like": [], "numeric": [], "text": []}
+    for collection in collections[:5]:
+        for field in collection.get("fields", []) if isinstance(collection.get("fields"), list) else []:
+            lowered = str(field).lower()
+            if lowered.endswith("_id") or lowered in {"id", "country", "kind", "doc_number"}:
+                groups["identifier"].append(str(field))
+            elif "date" in lowered or "time" in lowered or lowered.endswith("_at"):
+                groups["date"].append(str(field))
+            elif lowered.endswith("s") or lowered in {"items", "events", "alerts", "readings"}:
+                groups["list_like"].append(str(field))
+            elif any(marker in lowered for marker in ("count", "total", "rate", "score", "pct", "amount", "revenue")):
+                groups["numeric"].append(str(field))
+            else:
+                groups["text"].append(str(field))
+    return {key: _dedupe([str(item) for item in values])[:20] for key, values in groups.items() if values}
+
+
+def _dedupe(values: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        key = value.lower()
+        if key not in seen:
+            seen.add(key)
+            output.append(value)
+    return output
 
 
 def _pydantic_dump(obj: Any) -> dict[str, Any] | None:
@@ -1182,6 +1690,9 @@ def _table_cell_safe(value: Any, *, column: str | None = None, depth: int = 0) -
         if parsed is not value:
             return _table_cell_safe(parsed, column=column, depth=depth + 1)
         return _truncate_preview_string(value, MAX_TABLE_CELL_LENGTH)
+    if isinstance(value, Decimal):
+        numeric = float(value)
+        return int(numeric) if numeric.is_integer() else numeric
     if isinstance(value, (int, bool)):
         if column is not None and _is_identifier_column(column):
             return str(value)
@@ -1369,6 +1880,10 @@ def _artifact_column_defs(columns: Any) -> list[dict[str, Any]]:
 def _artifact_safe(value: Any, *, depth: int = 0) -> Any:
     if value is None or isinstance(value, (str, int, bool)):
         return value
+    if isinstance(value, Decimal):
+        numeric = float(value)
+        return int(numeric) if numeric.is_integer() else numeric
+
     if isinstance(value, float):
         if np.isnan(value) or np.isinf(value):
             return None
@@ -1418,14 +1933,7 @@ def _validated_chart_spec(name: str, chart_spec: Any, description: str | None = 
             ):
                 data_value = candidate
                 break
-    if isinstance(data_value, pd.DataFrame):
-        data = _records_from_table(data_value)
-    elif isinstance(data_value, Mapping):
-        data = _records_from_table(data_value)
-    elif isinstance(data_value, Sequence) and not isinstance(data_value, (str, bytes, bytearray)):
-        data = [object_to_record(item) for item in data_value]
-    else:
-        data = []
+    data = _chart_rows_from_value(data_value)
 
     if not data:
         got_type = type(data_value).__name__ if data_value is not None else "missing"
@@ -1444,6 +1952,7 @@ def _validated_chart_spec(name: str, chart_spec: Any, description: str | None = 
     if not all(y_key in row for row in data):
         raise ValueError(f"Chart y field '{y_key}' is missing from one or more rows")
 
+    data = _coerce_chart_y_values(data, y_key, chart_type)
     data, sampling = _reduce_chart_data(data, chart_type, x_key, y_key)
     spec = ChartArtifactSpec(
         id=str(raw.get("id") or new_id()),
@@ -1460,6 +1969,56 @@ def _validated_chart_spec(name: str, chart_spec: Any, description: str | None = 
     if sampling:
         spec["_sampling"] = sampling
     return spec
+
+
+def _chart_rows_from_value(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, pd.DataFrame):
+        return [_normalize_table_record(row) for row in value.to_dict(orient="records")]
+    if isinstance(value, pd.Series):
+        return _records_from_table(value.reset_index())
+    if isinstance(value, np.ndarray):
+        return _records_from_table(value)
+    if isinstance(value, Mapping):
+        return _records_from_table(value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        rows: list[dict[str, Any]] = []
+        for index, item in enumerate(value):
+            if isinstance(item, Mapping):
+                rows.append(_normalize_table_record(dict(item)))
+            elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+                rows.append({f"value_{i}": _table_cell_safe(cell) for i, cell in enumerate(item)})
+            else:
+                record = object_to_record(item)
+                if record.keys() == {"repr"}:
+                    rows.append({"index": index, "value": _table_cell_safe(item)})
+                else:
+                    rows.append(record)
+        return rows
+    return []
+
+
+def _coerce_chart_y_values(rows: list[dict[str, Any]], y_key: str, chart_type: str) -> list[dict[str, Any]]:
+    if chart_type not in {"bar", "line", "area", "scatter", "pie"}:
+        return rows
+    coerced: list[dict[str, Any]] = []
+    for row in rows:
+        next_row = dict(row)
+        value = next_row.get(y_key)
+        if isinstance(value, Decimal):
+            numeric = float(value)
+            next_row[y_key] = int(numeric) if numeric.is_integer() else numeric
+        elif isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                try:
+                    numeric = float(stripped)
+                    next_row[y_key] = int(numeric) if numeric.is_integer() else numeric
+                except ValueError:
+                    pass
+        coerced.append(next_row)
+    return coerced
 
 
 def _normalize_chart_type(value: Any) -> str:
@@ -1581,8 +2140,9 @@ def _json_safe(
     if isinstance(value, type):
         return _type_name(value)
 
-    if depth >= max_depth:
-        return _safe_repr(value, max_string_length)
+    if isinstance(value, Decimal):
+        numeric = float(value)
+        return int(numeric) if numeric.is_integer() else numeric
 
     if isinstance(value, float):
         if np.isnan(value) or np.isinf(value):
@@ -1600,6 +2160,9 @@ def _json_safe(
 
     if isinstance(value, (pd.Timestamp, datetime, date)):
         return value.isoformat()
+
+    if depth >= max_depth:
+        return _safe_repr(value, max_string_length)
 
     if isinstance(value, pd.DataFrame):
         frame = value.head(MAX_PREVIEW_ROWS)

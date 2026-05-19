@@ -147,6 +147,9 @@ def _key_findings(
             if column_count:
                 sample = ", ".join(str(column.get("key")) for column in artifact.columns[:8])
                 findings.append(f"Inferred columns include {sample}.")
+            row_names = _table_row_names(artifact)
+            if row_names:
+                findings.append(f"Rows include {', '.join(row_names[:8])}.")
         elif artifact.kind == "chart":
             chart_type = artifact.metadata.get("chart_type")
             if chart_type is None and artifact.chart_spec:
@@ -162,6 +165,22 @@ def _key_findings(
     if preview is not None and len(findings) < 3:
         findings.extend(_findings_from_preview(preview))
     return _dedupe(findings)[:5]
+
+
+def _table_row_names(artifact: ExecutionArtifact) -> list[str]:
+    rows = artifact.rows or artifact.metadata.get("rows") or []
+    if not isinstance(rows, list):
+        return []
+    candidates: list[str] = []
+    for row in rows[:8]:
+        if not isinstance(row, Mapping):
+            continue
+        for key in ("name", "path", "dataset_name", "element_index", "country", "category", "sensor_id"):
+            value = row.get(key)
+            if value is not None:
+                candidates.append(str(value))
+                break
+    return _dedupe(candidates)
 
 
 def _findings_from_preview(preview: Any) -> list[str]:
@@ -191,7 +210,10 @@ def _findings_from_preview(preview: Any) -> list[str]:
             if isinstance(value, (str, int, float, bool)) or value is None:
                 simple.append(f"{key}: {_format_scalar(value)}")
             elif isinstance(value, list):
-                simple.append(f"{key}: {len(value)} item{'s' if len(value) != 1 else ''}")
+                if str(key).lower() == "shape" and all(isinstance(item, (int, float)) for item in value):
+                    simple.append(f"{key}: {' x '.join(str(int(item)) for item in value)}")
+                else:
+                    simple.append(f"{key}: {len(value)} item{'s' if len(value) != 1 else ''}")
         return simple
     if isinstance(preview, list):
         return [f"Preview contains {len(preview)} item{'s' if len(preview) != 1 else ''}."]
@@ -317,6 +339,34 @@ def _structural_findings(preview: Mapping[str, Any]) -> list[str]:
         findings.append(f"Representative fields include {', '.join(fields[:10])}.")
         findings.extend(_semantic_field_group_findings(fields))
 
+    top_level_keys = preview.get("top_level_keys")
+    if isinstance(top_level_keys, list) and top_level_keys:
+        findings.append(f"Top-level keys: {', '.join(str(key) for key in top_level_keys[:10])}.")
+
+    tables = preview.get("tables_detected")
+    if isinstance(tables, list) and tables:
+        names = [str(item.get("path") or item.get("name")) for item in tables if isinstance(item, Mapping)]
+        if names:
+            findings.append(f"Detected tables: {', '.join(names[:8])}.")
+
+    arrays = preview.get("arrays_detected")
+    if isinstance(arrays, list) and arrays:
+        names = [str(item.get("path") or item.get("name")) for item in arrays if isinstance(item, Mapping)]
+        if names:
+            findings.append(f"Detected arrays: {', '.join(names[:8])}.")
+
+    collections = preview.get("record_collections_detected")
+    if isinstance(collections, list) and collections:
+        names = [str(item.get("path") or item.get("name")) for item in collections if isinstance(item, Mapping)]
+        if names:
+            findings.append(f"Record collections: {', '.join(names[:8])}.")
+
+    custom = preview.get("custom_objects_detected")
+    if isinstance(custom, list) and custom:
+        names = [str(item.get("type") or item.get("path")) for item in custom if isinstance(item, Mapping)]
+        if names:
+            findings.append(f"Custom objects detected: {', '.join(_dedupe(names)[:6])}.")
+
     return findings
 
 
@@ -338,6 +388,19 @@ def _representative_fields(preview: Mapping[str, Any]) -> list[str]:
     columns = preview.get("columns")
     if isinstance(columns, list):
         return [str(column.get("key") if isinstance(column, Mapping) else column) for column in columns]
+    collections = preview.get("record_collections_detected") or preview.get("likely_primary_records")
+    if isinstance(collections, list):
+        for collection in collections:
+            if isinstance(collection, Mapping) and isinstance(collection.get("fields"), list):
+                return [str(field) for field in collection["fields"] if not str(field).startswith("__")]
+    field_groups = preview.get("field_groups")
+    if isinstance(field_groups, Mapping):
+        fields: list[str] = []
+        for value in field_groups.values():
+            if isinstance(value, list):
+                fields.extend(str(item) for item in value if not str(item).startswith("__"))
+        if fields:
+            return _dedupe(fields)
     keys = preview.get("keys")
     if isinstance(keys, list):
         return [str(key) for key in keys]
@@ -469,18 +532,30 @@ def _schema_groups(preview: Mapping[str, Any]) -> dict[str, list[str]]:
 
     explicit_map = {
         "scalar_fields": "scalar",
+        "scalars": "scalar",
+        "scalar": "scalar",
         "date_fields": "date",
+        "dates": "date",
+        "date": "date",
         "date_like_fields": "date",
         "list_fields": "list",
+        "lists": "list",
+        "list": "list",
         "list_like_fields": "list",
         "numeric_fields": "numeric",
+        "numerics": "numeric",
         "boolean_fields": "boolean",
+        "booleans": "boolean",
         "nullable_fields": "nullable",
     }
     for source, target in explicit_map.items():
         value = preview.get(source)
         if isinstance(value, list):
             grouped[target].extend(str(item) for item in value if not _is_wrapper_field(str(item)))
+        elif isinstance(value, Mapping):
+            fields = value.get("fields") or value.get("columns")
+            if isinstance(fields, list):
+                grouped[target].extend(str(item) for item in fields if not _is_wrapper_field(str(item)))
 
     for key, value in preview.items():
         if key in {

@@ -10,7 +10,23 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.core.config import get_settings
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode, new_id
-from app.runtime.python_executor import PythonExecutor, object_to_record, objects_to_records, safe_attrs, to_dataframe
+from app.runtime.python_executor import (
+    PythonExecutor,
+    find_record_collections,
+    flatten_records_at_path,
+    inspect_object,
+    object_to_record,
+    objects_to_records,
+    safe_attrs,
+    summarize_structure,
+    to_dataframe,
+)
+from scripts.create_agent_test_datasets import (
+    build_custom_sensor_fleet,
+    build_mixed_dataframe_numpy_bundle,
+    build_mixed_top_level_collection,
+    build_nested_customer_events,
+)
 from app.services.introspection import introspect_object
 from app.storage.files import load_pickle, save_snapshot
 
@@ -198,6 +214,55 @@ def test_missing_pickle_class_like_helpers_extract_inner_attrs(db_session: Sessi
     assert result.result_preview["record"] == {"country": "CA", "title": "CLEANING ROBOT"}
     assert result.result_preview["columns"] == ["country", "title"]
     assert result.result_preview["rows"] == [{"country": "CA", "title": "CLEANING ROBOT"}]
+
+
+def test_generic_structure_helpers_detect_nested_customer_events() -> None:
+    dataset = build_nested_customer_events()
+
+    inspected = inspect_object(dataset)
+    summary = summarize_structure(dataset)
+    collections = find_record_collections(dataset)
+    customer_rows = flatten_records_at_path(dataset, "customers")
+    event_rows = flatten_records_at_path(dataset, "customers.events")
+
+    assert set(inspected["keys"]) >= {"metadata", "customers", "lookup_tables"}
+    assert any(item["path"] == "customers" for item in collections)
+    assert any(item["path"] == "customers.events" for item in collections)
+    assert summary["top_level_keys"] == ["metadata", "customers", "lookup_tables"]
+    assert {"customer_id", "country", "segment", "joined_at", "churn_risk"} <= set(customer_rows[0])
+    assert {"customer_id", "event_id", "timestamp", "channel", "event_type", "order_total"} <= set(event_rows[0])
+
+
+def test_generic_structure_helpers_detect_bundle_tables_and_arrays() -> None:
+    dataset = build_mixed_dataframe_numpy_bundle()
+
+    summary = summarize_structure(dataset)
+    table_paths = {item["path"] for item in summary["tables_detected"]}
+    array_paths = {item["path"] for item in summary["arrays_detected"]}
+
+    assert {"users", "orders", "daily_metrics"} <= table_paths
+    assert {"user_embedding_matrix", "cohort_tensor"} <= array_paths
+
+
+def test_generic_structure_helpers_detect_custom_sensor_fleet_readings() -> None:
+    dataset = build_custom_sensor_fleet()
+
+    inspected = inspect_object(dataset)
+    collections = find_record_collections(dataset)
+    reading_rows = flatten_records_at_path(dataset, "sensors.readings")
+
+    assert inspected["type"] == "SensorFleet"
+    assert any(item["path"] == "sensors.readings" for item in collections)
+    assert {"sensor_id", "timestamp", "temperature_c", "vibration_g", "battery_pct"} <= set(reading_rows[0])
+
+
+def test_generic_structure_helpers_detect_mixed_top_level_collection() -> None:
+    dataset = build_mixed_top_level_collection()
+
+    inspected = inspect_object(dataset)
+    item_types = {item["type"] for item in inspected["item_types"]}
+
+    assert {"dict", "DataFrame", "ndarray", "list", "tuple"} <= item_types
 
 
 def test_softbank_patent_helper_conversion_matches_missing_pickle_shape() -> None:
