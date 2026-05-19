@@ -119,3 +119,16 @@
 - Verified backend tests pass: `34 passed`.
 - Verified backend lint passes: `ruff check .`.
 - Verified frontend build passes: `npm run build`.
+- Started robust tests and demo datasets phase.
+- Added `backend/scripts/create_demo_pickles.py` to generate deterministic pickle fixtures for mixed-type DataFrames, nested list-of-dicts, ndarrays, custom objects, mixed collections, and joinable users/orders datasets.
+- Generated pickle fixtures under `backend/tests/fixtures/generated/`.
+- Added `AGENT_MODEL_MODE=fake` and a lightweight deterministic `FakeAgentModelClient` for tests and local demos without OpenAI API calls.
+- Added generated-fixture workflow tests covering upload/introspection for each fixture type, chat "what is this file?", mutation persistence, rollback, fork, CSV export after mutation, chart artifact creation, multi-dataset comparison, and executor error recovery.
+- Added a local SoftBank pickle smoke test that runs when `/Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl` is present.
+- Added tolerant pickle loading fallback for missing custom class modules, so external pickles with unavailable modules can still be profiled with placeholder objects.
+- Expanded executor safe builtins with common generic inspection helpers (`getattr`, `hasattr`, `iter`, `next`).
+- Updated root/backend READMEs and `.env.example` with fake-agent mode, demo fixture generation, and feature test instructions.
+- Verified generated-fixture workflow tests pass: `11 passed`.
+- Verified full backend tests pass: `45 passed`.
+- Verified backend lint passes: `ruff check .`.
+- Verified frontend build passes: `npm run build`.

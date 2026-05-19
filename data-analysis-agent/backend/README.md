@@ -17,6 +17,44 @@ Or use the backend helper:
 make dev
 ```
 
+## Demo Pickles and Tests
+
+Generate deterministic demo pickle fixtures with:
+
+```bash
+python scripts/create_demo_pickles.py
+```
+
+This writes:
+
+- `tests/fixtures/generated/dataframe_transactions.pkl`
+- `tests/fixtures/generated/list_of_dicts_nested.pkl`
+- `tests/fixtures/generated/numpy_array.pkl`
+- `tests/fixtures/generated/custom_objects.pkl`
+- `tests/fixtures/generated/mixed_collection.pkl`
+- `tests/fixtures/generated/multi_dataset_users.pkl`
+- `tests/fixtures/generated/multi_dataset_orders.pkl`
+
+Run the full backend suite with:
+
+```bash
+pytest
+```
+
+The generated-fixture workflow tests cover each required demo behavior:
+
+- Upload and introspection for DataFrame, nested list-of-dicts, ndarray, custom objects, and mixed collections.
+- Chat "What is this file?" through `POST /api/sessions/{session_id}/chat/stream`.
+- Mutation persistence, rollback, fork, and CSV export after mutation.
+- Agent-created chart artifacts through `save_chart()`.
+- Multi-dataset comparison using joinable users/orders fixtures.
+- Executor error recovery with a deterministic fake agent retry.
+
+Set `AGENT_MODEL_MODE=fake` to use the lightweight deterministic fake agent instead of the OpenAI
+API. The tests set this automatically. If
+`/Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl` exists, the suite also uploads
+that local pickle as a smoke test for externally generated custom-class data.
+
 ## Current Endpoints
 
 - `GET /health` returns service status for local development and frontend connectivity checks.

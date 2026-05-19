@@ -111,6 +111,108 @@ class OpenAIResponsesClient:
         )
 
 
+class FakeAgentModelClient:
+    """Deterministic model double for tests and local demos without API calls."""
+
+    def __init__(self) -> None:
+        self.recovery_started = False
+
+    def create_response(
+        self,
+        *,
+        instructions: str,
+        input_items: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> AgentModelResponse:
+        del instructions, tools
+        last_item = input_items[-1] if input_items else {}
+        if last_item.get("type") == "function_call_output":
+            output = parse_tool_arguments(str(last_item.get("output", "{}")))
+            if output.get("ok") is False and self.recovery_started:
+                return _fake_tool_response(
+                    "execute_python",
+                    {
+                        "code": "print(type(data).__name__)\npreview(data)",
+                        "mutates_state": False,
+                    },
+                )
+
+            state_changed = bool(output.get("updated_datasets"))
+            artifact_count = len(output.get("artifacts", []) or [])
+            if state_changed:
+                answer = "Saved the requested dataset mutation as a new version."
+            elif artifact_count:
+                answer = f"Created {artifact_count} artifact{'s' if artifact_count != 1 else ''}."
+            else:
+                answer = "I inspected the dataset and summarized its structure."
+            return _fake_tool_response("final_answer", {"answer": answer, "state_changed": state_changed})
+
+        prompt = _latest_user_request(input_items).lower()
+        if "error recovery" in prompt or "retry path" in prompt:
+            self.recovery_started = True
+            return _fake_tool_response(
+                "execute_python",
+                {"code": "preview(data['__definitely_missing_for_retry__'])", "mutates_state": False},
+            )
+
+        if any(term in prompt for term in ("visualize", "chart", "plot")):
+            return _fake_tool_response(
+                "execute_python",
+                {
+                    "code": _fake_chart_code(),
+                    "mutates_state": False,
+                },
+            )
+
+        if any(term in prompt for term in ("compare", "join", "multi-dataset", "multiple datasets")):
+            return _fake_tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "print(sorted(datasets.keys()))",
+                            "summary = {key: {'type': type(value).__name__, 'shape': getattr(value, 'shape', None)} for key, value in datasets.items()}",
+                            "preview(summary)",
+                        ]
+                    ),
+                    "mutates_state": False,
+                },
+            )
+
+        if any(term in prompt for term in ("mutate", "mutation", "add test column")):
+            return _fake_tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "if isinstance(data, pd.DataFrame):",
+                            "    data = data.copy()",
+                            "    data['__agent_test_row_number'] = range(len(data))",
+                            "else:",
+                            "    datasets[next(iter(datasets))] = data",
+                            "preview(data)",
+                        ]
+                    ),
+                    "mutates_state": True,
+                    "mutation_summary": "Add agent test row number column",
+                },
+            )
+
+        return _fake_tool_response(
+            "execute_python",
+            {
+                "code": "\n".join(
+                    [
+                        "summary = {'type': type(data).__name__, 'shape': getattr(data, 'shape', None), 'length': len(data) if hasattr(data, '__len__') else None}",
+                        "print(summary)",
+                        "preview(summary)",
+                    ]
+                ),
+                "mutates_state": False,
+            },
+        )
+
+
 class CodingAgent:
     def __init__(
         self,
@@ -816,6 +918,60 @@ def _model_dump(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return item
     return dict(item)
+
+
+def _fake_tool_response(name: str, arguments: dict[str, Any]) -> AgentModelResponse:
+    call_id = f"fake-{name}-{new_id()}"
+    return AgentModelResponse(
+        tool_calls=[AgentToolCall(id=call_id, name=name, arguments=arguments)],
+        raw_output_items=[
+            {
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": json.dumps(arguments),
+            }
+        ],
+    )
+
+
+def _latest_user_content(input_items: list[dict[str, Any]]) -> str:
+    for item in reversed(input_items):
+        if item.get("role") == "user":
+            return str(item.get("content", ""))
+    return ""
+
+
+def _latest_user_request(input_items: list[dict[str, Any]]) -> str:
+    content = _latest_user_content(input_items)
+    marker = "User request:"
+    if marker not in content:
+        return content
+    request = content.split(marker, maxsplit=1)[1]
+    return request.split("Respond by using", maxsplit=1)[0].strip()
+
+
+def _fake_chart_code() -> str:
+    return "\n".join(
+        [
+            "if isinstance(data, pd.DataFrame) and len(data) > 0:",
+            "    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()",
+            "    label_cols = [col for col in data.columns if col not in numeric_cols]",
+            "    y = numeric_cols[0] if numeric_cols else data.columns[0]",
+            "    x = label_cols[0] if label_cols else data.columns[0]",
+            "    if x != y and numeric_cols:",
+            "        rows = data.groupby(x, dropna=False, as_index=False)[y].sum().head(10).to_dict('records')",
+            "    else:",
+            "        rows = data.head(10).reset_index().rename(columns={'index': 'row'}).to_dict('records')",
+            "        x = 'row'",
+            "    save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': x, 'y': y, 'description': 'Deterministic test chart'})",
+            "    preview(rows)",
+            "else:",
+            "    rows = [{'name': key, 'size': len(value) if hasattr(value, '__len__') else 1} for key, value in datasets.items()]",
+            "    save_chart('Fake agent chart', {'title': 'Fake agent chart', 'chart_type': 'bar', 'data': rows, 'x': 'name', 'y': 'size', 'description': 'Dataset sizes'})",
+            "    preview(rows)",
+        ]
+    )
 
 
 def _extract_text(response: Any) -> str | None:

@@ -8,13 +8,16 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
-from app.agent.agent import ChatStreamRequest, CodingAgent, OpenAIResponsesClient
+from app.agent.agent import AgentModelClient, ChatStreamRequest, CodingAgent, FakeAgentModelClient, OpenAIResponsesClient
+from app.core.config import get_settings
 from app.db.session import get_session
 
 router = APIRouter(prefix="/api/sessions", tags=["chat"])
 
 
-def get_model_client() -> OpenAIResponsesClient:
+def get_model_client() -> AgentModelClient:
+    if get_settings().agent_model_mode == "fake":
+        return FakeAgentModelClient()
     return OpenAIResponsesClient()
 
 
@@ -23,7 +26,7 @@ def stream_chat(
     session_id: str,
     request: ChatStreamRequest,
     db: Annotated[Session, Depends(get_session)],
-    model_client: Annotated[OpenAIResponsesClient, Depends(get_model_client)],
+    model_client: Annotated[AgentModelClient, Depends(get_model_client)],
 ) -> StreamingResponse:
     agent = CodingAgent(db, model_client=model_client)
     return StreamingResponse(

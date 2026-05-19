@@ -1,4 +1,5 @@
 from pathlib import Path
+import pickle
 from uuid import uuid4
 
 import cloudpickle
@@ -55,8 +56,12 @@ async def save_upload(session_id: str, dataset_id: str, upload: UploadFile) -> P
 
 
 def load_pickle(path: Path) -> object:
-    with path.open("rb") as source:
-        return cloudpickle.load(source)
+    try:
+        with path.open("rb") as source:
+            return cloudpickle.load(source)
+    except (AttributeError, ImportError, ModuleNotFoundError):
+        with path.open("rb") as source:
+            return _MissingClassUnpickler(source).load()
 
 
 def save_snapshot(session_id: str, dataset_id: str, version_id: str, value: object) -> Path:
@@ -65,3 +70,28 @@ def save_snapshot(session_id: str, dataset_id: str, version_id: str, value: obje
         cloudpickle.dump(value, target)
 
     return destination
+
+
+class _MissingClassUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str) -> object:
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ImportError, ModuleNotFoundError):
+            return _placeholder_class(module, name)
+
+
+def _placeholder_class(module: str, name: str) -> type:
+    def repr_placeholder(self: object) -> str:
+        attrs = getattr(self, "__dict__", {})
+        preview = f" attrs={attrs!r}" if attrs else ""
+        return f"<MissingPickleClass {module}.{name}{preview}>"
+
+    return type(
+        name,
+        (),
+        {
+            "__module__": module,
+            "__repr__": repr_placeholder,
+            "_missing_pickle_class": True,
+        },
+    )
