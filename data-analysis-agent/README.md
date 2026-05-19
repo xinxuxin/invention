@@ -42,6 +42,7 @@ React + Vite + TypeScript
   - Server-Sent Events client for streamed agent events
   - localStorage restores the last backend session across browser sessions
   - dismissible notifications and animated collapsible traces/results
+  - Markdown chat transcript export with an option to include or omit trace events
 
 FastAPI
   - sessions, datasets, branches, versions, exports, artifacts, confirmations
@@ -168,6 +169,9 @@ The UI renders trace events in a collapsible animated panel and final answers in
 card. New trace/code events briefly expand, then fold into a compact summary so long errors such as
 timeouts remain inspectable without overwhelming the chat. There is no spinner-only behavior: users
 see the agent's public progress as it works.
+
+The Chat view also includes a transcript export control. It downloads the current browser chat as
+Markdown and lets the user choose whether streamed trace/code/result events are included.
 
 ## Session State And Mutations
 

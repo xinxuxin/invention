@@ -21,6 +21,7 @@ import {
 import { Button } from "../components/Button";
 import { ArtifactCard } from "../components/ArtifactCard";
 import { BranchTimeline } from "../components/BranchTimeline";
+import { ChatExportCard } from "../components/ChatExportCard";
 import { ChatInput } from "../components/ChatInput";
 import { ChatThread } from "../components/ChatThread";
 import { CollapsibleCard } from "../components/CollapsibleCard";
@@ -392,6 +393,13 @@ export function Dashboard() {
                       changing state.
                     </p>
                   </div>
+
+                  <ChatExportCard
+                    messages={chat.messages}
+                    sessionName={workspace.session?.name}
+                    activeDatasetName={workspace.activeDataset?.original_filename}
+                    branchName={branch?.name}
+                  />
 
                   <div className="rounded-lg border border-indigo-100 bg-indigo-50/70 p-4">
                     <div className="flex items-start justify-between gap-3">

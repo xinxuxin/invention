@@ -166,3 +166,7 @@
 - Verified backend tests pass: `50 passed`.
 - Verified backend lint passes: `ruff check .`.
 - Verified frontend build passes: `npm run build`.
+- Added Chat transcript export in the Run context panel.
+- Export downloads the current browser chat as Markdown and includes a checkbox to include or omit streamed trace/code/result events.
+- Added transcript formatting for user messages, final answers, state-change flag, artifacts, code, stdout/stderr, traceback, previews, and confirmation/error trace events.
+- Verified frontend build passes: `npm run build`.
