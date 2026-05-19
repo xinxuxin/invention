@@ -32,12 +32,13 @@ const initialUploadState: UploadState = {
   message: null,
 };
 
-const SESSION_STORAGE_KEY = "data-analysis-agent-session-id";
-const LEGACY_SESSION_STORAGE_KEY = SESSION_STORAGE_KEY;
+const SESSION_STORAGE_KEY = "data_analysis_agent:last_session_id";
+const LEGACY_SESSION_STORAGE_KEY = "data-analysis-agent-session-id";
 let sessionBootstrap: Promise<{
   session: AnalysisSession;
   datasets: Dataset[];
   history: HistoryVersion[];
+  restored: boolean;
 }> | null = null;
 
 export function useWorkspace() {
@@ -52,13 +53,15 @@ export function useWorkspace() {
   const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<"loading" | "ready" | "error">("loading");
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [restoreMessage, setRestoreMessage] = useState<string | null>(null);
+  const [recentSessions, setRecentSessions] = useState<AnalysisSession[]>([]);
   const [upload, setUpload] = useState<UploadState>(initialUploadState);
 
   useEffect(() => {
     let isMounted = true;
 
     bootstrapSession()
-      .then(({ session: readySession, datasets: readyDatasets, history: readyHistory }) => {
+      .then(({ session: readySession, datasets: readyDatasets, history: readyHistory, restored }) => {
         if (!isMounted) {
           return;
         }
@@ -68,7 +71,9 @@ export function useWorkspace() {
         setHistory(readyHistory);
         setActiveDatasetId(readySession.active_dataset_id ?? readyDatasets[0]?.id ?? null);
         setSelectedVersionId(lastItem(readyHistory)?.id ?? null);
+        setRestoreMessage(restored ? "Restored previous session" : null);
         setSessionStatus("ready");
+        void refreshRecentSessions(setRecentSessions);
       })
       .catch((error: unknown) => {
         if (!isMounted) {
@@ -120,6 +125,52 @@ export function useWorkspace() {
         : lastItem(refreshed.history)?.id ?? null,
     );
   }, [session]);
+
+  const restoreSession = useCallback(async (sessionId: string) => {
+    setSessionStatus("loading");
+    setSessionError(null);
+    try {
+      const restored = await loadWorkspace(sessionId);
+      sessionBootstrap = Promise.resolve({ ...restored, restored: true });
+      applyActiveSession(restored.session.id);
+      setSession(restored.session);
+      setDatasets(restored.datasets);
+      setHistory(restored.history);
+      setActiveDatasetId(restored.session.active_dataset_id ?? restored.datasets[0]?.id ?? null);
+      setSelectedVersionId(lastItem(restored.history)?.id ?? null);
+      setExportArtifacts([]);
+      setRestoreMessage("Restored previous session");
+      setSessionStatus("ready");
+      await refreshRecentSessions(setRecentSessions);
+    } catch (error: unknown) {
+      setSessionStatus("error");
+      setSessionError(error instanceof Error ? error.message : "Unable to restore session");
+    }
+  }, []);
+
+  const startNewSession = useCallback(async () => {
+    setSessionStatus("loading");
+    setSessionError(null);
+    try {
+      const created = await createSession("New conversation");
+      applyActiveSession(created.id);
+      const loaded = await loadWorkspace(created.id);
+      sessionBootstrap = Promise.resolve({ ...loaded, restored: false });
+      setSession(loaded.session);
+      setDatasets(loaded.datasets);
+      setHistory(loaded.history);
+      setActiveDatasetId(null);
+      setSelectedVersionId(null);
+      setExportArtifacts([]);
+      setRestoreMessage("Started a new conversation");
+      setUpload(initialUploadState);
+      setSessionStatus("ready");
+      await refreshRecentSessions(setRecentSessions);
+    } catch (error: unknown) {
+      setSessionStatus("error");
+      setSessionError(error instanceof Error ? error.message : "Unable to create session");
+    }
+  }, []);
 
   const uploadFiles = useCallback(
     async (files: File[]) => {
@@ -303,6 +354,8 @@ export function useWorkspace() {
     session,
     sessionStatus,
     sessionError,
+    restoreMessage,
+    recentSessions,
     datasets,
     activeDataset,
     activeDatasetId,
@@ -320,6 +373,8 @@ export function useWorkspace() {
     uploadFiles,
     refreshDatasets,
     refreshWorkspace,
+    restoreSession,
+    startNewSession,
     createBranch,
     checkoutBranch: checkout,
     rollbackVersion: rollback,
@@ -334,12 +389,16 @@ async function bootstrapSession() {
   }
 
   sessionBootstrap = (async () => {
+    const urlSessionId = new URLSearchParams(window.location.search).get("session");
     const existingId =
-      window.localStorage.getItem(SESSION_STORAGE_KEY) ??
+      urlSessionId ||
+      window.localStorage.getItem(SESSION_STORAGE_KEY) ||
       window.sessionStorage.getItem(LEGACY_SESSION_STORAGE_KEY);
     if (existingId) {
       try {
-        return await loadWorkspace(existingId);
+        const loaded = await loadWorkspace(existingId);
+        applyActiveSession(loaded.session.id);
+        return { ...loaded, restored: true };
       } catch {
         window.localStorage.removeItem(SESSION_STORAGE_KEY);
         window.sessionStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
@@ -349,16 +408,33 @@ async function bootstrapSession() {
     const existingSessions = await listSessions();
     const latestSession = existingSessions.sessions[0];
     if (latestSession) {
-      window.localStorage.setItem(SESSION_STORAGE_KEY, latestSession.id);
-      return await loadWorkspace(latestSession.id);
+      applyActiveSession(latestSession.id);
+      return { ...(await loadWorkspace(latestSession.id)), restored: true };
     }
 
     const createdSession = await createSession("Demo workspace");
-    window.localStorage.setItem(SESSION_STORAGE_KEY, createdSession.id);
-    return await loadWorkspace(createdSession.id);
+    applyActiveSession(createdSession.id);
+    return { ...(await loadWorkspace(createdSession.id)), restored: false };
   })();
 
   return sessionBootstrap;
+}
+
+function applyActiveSession(sessionId: string) {
+  window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+  window.sessionStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
+  const url = new URL(window.location.href);
+  url.searchParams.set("session", sessionId);
+  window.history.replaceState({}, "", url);
+}
+
+async function refreshRecentSessions(setRecentSessions: (sessions: AnalysisSession[]) => void) {
+  try {
+    const response = await listSessions();
+    setRecentSessions(response.sessions.slice(0, 10));
+  } catch {
+    // Recent sessions are a convenience; workspace restore errors are surfaced elsewhere.
+  }
 }
 
 async function loadWorkspace(sessionId: string) {

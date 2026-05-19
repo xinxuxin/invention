@@ -11,7 +11,15 @@ engine = create_engine(settings.database_url, connect_args=connect_args)
 
 
 def init_db() -> None:
-    from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, PendingConfirmation, VersionNode  # noqa: F401
+    from app.models.entities import (  # noqa: F401
+        AnalysisSession,
+        Artifact,
+        Branch,
+        ChatMessage,
+        Dataset,
+        PendingConfirmation,
+        VersionNode,
+    )
 
     SQLModel.metadata.create_all(engine)
     _migrate_sqlite()

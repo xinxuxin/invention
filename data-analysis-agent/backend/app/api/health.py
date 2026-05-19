@@ -23,6 +23,8 @@ async def health_config() -> dict[str, object]:
         "verifier_mode": settings.verifier_mode,
         "llm_verifier_model": settings.llm_verifier_model,
         "llm_verifier_timeout_seconds": settings.llm_verifier_timeout_seconds,
+        "llm_verifier_policy": settings.llm_verifier_policy,
+        "llm_verifier_complexity_threshold": settings.llm_verifier_complexity_threshold,
         "verifier_skip_llm_after_step": settings.verifier_skip_llm_after_step,
         "has_openai_api_key": bool(settings.openai_api_key),
     }

@@ -300,3 +300,16 @@
 - Verified frontend build passes: `npm run build`.
 - Verified real OpenAI-mode SoftBank quick eval passes against local backend with the provided API key kept in process environment only.
 - Verified repeated country pie chart smoke: 3/3 runs created a non-empty `pie` chart artifact.
+- Added durable `ChatMessage` persistence for user messages, assistant messages, compact trace events, final answers, state-change flags, and attached artifact ids.
+- Added restore endpoints: `GET /api/sessions/{session_id}/messages` and `GET /api/sessions/{session_id}/artifacts`, plus richer recent-session metadata from `GET /api/sessions`.
+- Updated chat SSE persistence so streamed trace/final/artifact events are saved as they happen; confirmation approvals/rejections now update the same persisted assistant message.
+- Updated frontend session bootstrap to restore from `?session=<id>` or `data_analysis_agent:last_session_id`, then load messages, datasets, branches/history, and artifacts.
+- Added **New conversation** and **Recent sessions** UI, with saved session cards, active highlighting, localStorage/URL updates, and a restore status notice.
+- Completed old-message trace UX polish: restored/completed traces default collapsed while active streaming traces auto-open.
+- Improved table artifact cards with column-count badges and "Showing X of Y columns" metadata when the display grid hides columns.
+- Added selective LLM verifier complexity scoring and a public "Semantic verifier reviewed the result." trace only when the semantic verifier actually runs.
+- Updated README with a requirement coverage table, persistence QA workflow, and multi-role agent diagram.
+- Verified backend lint passes: `ruff check app tests`.
+- Verified backend tests pass: `132 passed`.
+- Verified frontend lint passes: `npm run lint`.
+- Verified frontend build passes: `npm run build`.

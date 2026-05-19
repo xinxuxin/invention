@@ -376,20 +376,57 @@ analysis, and cross-session persistence.
 
 ## Requirement And Stretch Goal Checklist
 
-- Generic arbitrary pickle upload: done.
-- General coding agent rather than fixed analytics router: done.
-- Minimal tools: done.
-- Streamed intermediate trace events: done.
-- Final answer visually distinct from trace: done.
-- Mutations persist across turns: done.
-- CSV export reflects current session state or intermediate result: done.
-- Inline visualizations: done.
-- Multi-dataset sessions: done.
-- Forking/branching mutation history: done.
-- Dangerous mutation confirmation: done.
-- Cross-session persistence: done via SQLite/filesystem plus frontend restore and `GET /api/sessions`.
-- Clarification before ambiguous dangerous writes: done through controller preflight, prompt behavior,
-  and fake-agent tests.
+| Capability | Status | Where | Demo |
+| --- | --- | --- | --- |
+| Arbitrary trusted `.pkl` upload | Done | `backend/app/api/sessions.py`, `backend/app/services/introspection.py` | Upload any fixture or the SoftBank pickle. |
+| General coding agent, not tool router | Done | `backend/app/agent/*`, `backend/app/runtime/python_executor.py` | Ask open-ended data questions; the LLM writes Python against `datasets`/`data`. |
+| Minimal external tools | Done | `backend/app/agent/tools.py` | External tools stay `execute_python`, `final_answer`, `request_confirmation`. |
+| Streamed trace events | Done | SSE chat endpoint and `ChatThread` | Ask "What's in this file?" and watch trace/code/verifier events stream. |
+| Distinct final answer | Done | `ResponseComposer`, frontend final answer card | Final answer renders separately from trace. |
+| Write persistence | Done | `VersionNode` snapshots and branch pointers | Mutate, then ask a follow-up count question. |
+| Session/chat persistence | Done | `ChatMessage`, `GET /api/sessions/{id}/messages`, localStorage/URL restore | Refresh or restart backend and reload `?session=...`. |
+| CSV export | Done | `save_csv`, export endpoints, artifact cards | Export current branch or an intermediate artifact. |
+| Inline visualizations | Done | `save_chart`, Recharts artifact cards | Ask for country or filing-year charts. |
+| Multi-dataset sessions | Done | dataset registry, executor `datasets` namespace | Upload users/orders fixtures and compare them. |
+| Branch/fork history | Done | branch/history endpoints and timeline UI | Fork, rollback, and switch branches. |
+| Dangerous write confirmation | Done | pending confirmations and polished modal | Ask "delete last 500 entries". |
+| Clarification questions | Done | controller preflight and agent prompt | Ask "Remove bad records." |
+| Cross-session reload persistence | Done | SQLite + filesystem + Recent Sessions UI | Restore an older saved session from the sidebar. |
+
+## Persistence QA
+
+1. Start backend and frontend.
+2. Upload `softbank_group_patent_portfolio_metadata.pkl`.
+3. Ask: "What's in this file?"
+4. Ask: "delete last 500 entries" and approve the confirmation.
+5. Ask: "How many records are in the current dataset now?" Expected: 23,910 if the original had 24,410 records.
+6. Refresh the browser. The previous messages, trace summaries, artifacts, active dataset, branch, and current version should restore.
+7. Stop and restart the backend, then reload the same `?session=<id>` URL. Messages, artifacts, branch, version, and mutated row count should still restore.
+8. Click **New conversation**. A blank session should start, while the old session remains in **Recent sessions**.
+9. Click the old session in **Recent sessions**. The old chat and mutated state should return.
+
+## Multi-Role Agent Workflow
+
+```mermaid
+flowchart TD
+  User["User"] --> UI["Frontend Chat UI"]
+  UI --> SSE["FastAPI Chat Stream"]
+  SSE --> Orchestrator["AgentOrchestrator / Controller"]
+  Orchestrator --> Coding["CodingAgent"]
+  Coding --> Executor["PythonExecutor"]
+  Executor --> Verifier["ResultVerifier"]
+  Verifier --> Det["Deterministic hard rules"]
+  Verifier --> LLM["Optional LLM verifier for complex tasks"]
+  Verifier --> Composer["ResponseComposer"]
+  Composer --> Artifacts["Inline Table / Chart / CSV Artifacts"]
+  Artifacts --> UI
+```
+
+The verifier does not turn the project into a fixed analytics router. It checks whether the
+general-purpose coding agent satisfied the request: required artifacts exist, wrapper columns are
+not leaking, state changes match user intent, and complex semantic/schema tasks can receive one
+selective LLM verifier pass. If the LLM verifier is slow, unavailable, invalid, or disabled, the
+deterministic verifier remains the source of truth.
 
 ## Security Notes
 
@@ -408,7 +445,8 @@ Current implementation limitations:
 - SQLite/filesystem storage is appropriate for demo/local use, not high-concurrency production.
 - Real model behavior depends on prompt following; critical destructive workflows should add deeper
   policy enforcement.
-- Frontend session restore assumes a trusted single-user browser.
+- Frontend session restore assumes a trusted single-user browser; there is no account-level session
+  isolation.
 
 ## Tradeoffs
 
@@ -427,5 +465,5 @@ Current implementation limitations:
 - Rich version diffs across arbitrary objects.
 - Background job queue for large pickle uploads and long-running analysis.
 - More granular risk previews before destructive mutations.
-- Persisted conversation history and named saved demo workspaces.
+- Server-side session naming/renaming beyond the first-message auto-title.
 - Better chart recommendation feedback and artifact provenance.

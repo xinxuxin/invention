@@ -4,6 +4,7 @@ import {
   Activity,
   AlertCircle,
   CheckCircle2,
+  Clock3,
   Database,
   FileDown,
   GitBranch,
@@ -12,6 +13,7 @@ import {
   Loader2,
   MessageSquareText,
   PanelRight,
+  PlusCircle,
   ShieldCheck,
   Sparkles,
   Upload,
@@ -32,6 +34,7 @@ import { UploadDropzone } from "../components/UploadDropzone";
 import { useChat } from "../hooks/useChat";
 import { useHealth } from "../hooks/useHealth";
 import { useWorkspace } from "../hooks/useWorkspace";
+import type { AnalysisSession } from "../types/api";
 
 type ToastMessage = {
   id: string;
@@ -139,6 +142,21 @@ export function Dashboard() {
               icon={<ShieldCheck className="h-3.5 w-3.5 text-emerald-700" />}
             />
             <ViewSwitcher value={view} onChange={setView} />
+            <Button
+              variant="secondary"
+              disabled={workspace.sessionStatus === "loading"}
+              onClick={() => {
+                if (chat.isStreaming && !window.confirm("A response is still running. Start a new conversation anyway?")) {
+                  return;
+                }
+                chat.stop();
+                chat.clearMessages();
+                void workspace.startNewSession();
+              }}
+            >
+              <PlusCircle className="h-4 w-4" />
+              New conversation
+            </Button>
             <Button variant="secondary" disabled={!workspace.session}>
               <Upload className="h-4 w-4" />
               Upload ready
@@ -173,6 +191,11 @@ export function Dashboard() {
                 Workspace
               </p>
               <h2 className="mt-2 text-lg font-bold">Session and datasets</h2>
+              {workspace.restoreMessage ? (
+                <p className="mt-2 rounded-md bg-emerald-50 px-2 py-1 text-xs font-bold text-emerald-800">
+                  {workspace.restoreMessage}
+                </p>
+              ) : null}
               {workspace.sessionError ? (
                 <p className="mt-2 text-xs font-semibold text-rose-700">{workspace.sessionError}</p>
               ) : null}
@@ -184,6 +207,40 @@ export function Dashboard() {
                 upload={workspace.upload}
                 onUpload={workspace.uploadFiles}
               />
+
+              <CollapsibleCard
+                title="Recent sessions"
+                eyebrow={`${workspace.recentSessions.length} saved`}
+                icon={<Clock3 className="h-4 w-4" />}
+                defaultOpen={workspace.recentSessions.length > 1}
+              >
+                {workspace.recentSessions.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-slate-300 bg-white/70 p-4 text-sm text-muted-foreground">
+                    Saved conversations will appear here after the first session is created.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {workspace.recentSessions.map((recent) => (
+                      <RecentSessionButton
+                        key={recent.id}
+                        session={recent}
+                        active={recent.id === workspace.session?.id}
+                        onClick={() => {
+                          if (recent.id === workspace.session?.id) {
+                            return;
+                          }
+                          if (chat.isStreaming && !window.confirm("A response is still running. Switch sessions anyway?")) {
+                            return;
+                          }
+                          chat.stop();
+                          chat.clearMessages();
+                          void workspace.restoreSession(recent.id);
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+              </CollapsibleCard>
 
               <CollapsibleCard
                 title="Uploaded datasets"
@@ -253,7 +310,9 @@ export function Dashboard() {
                   <p className="max-w-2xl break-words text-sm font-medium text-muted-foreground">
                     {workspace.activeDataset
                       ? `Active dataset: ${workspace.activeDataset.original_filename} (${workspace.activeDataset.dataset_key})`
-                      : "Waiting for a dataset"}
+                      : workspace.sessionStatus === "loading"
+                        ? "Restoring session..."
+                        : "Waiting for a dataset"}
                   </p>
                   <h2 className="mt-1 text-2xl font-bold">
                     {view === "chat" ? "Chat with your data runtime" : "Explore dataset profiles"}
@@ -681,6 +740,46 @@ function MiniMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function RecentSessionButton({
+  session,
+  active,
+  onClick,
+}: {
+  session: AnalysisSession;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full rounded-lg border p-3 text-left transition ${
+        active
+          ? "border-teal-300 bg-teal-50 shadow-sm"
+          : "border-border bg-white/72 hover:border-teal-200 hover:bg-white"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <p className="min-w-0 truncate text-sm font-bold">
+          {session.name || session.active_dataset_name || "Untitled session"}
+        </p>
+        {active ? (
+          <span className="shrink-0 rounded-full bg-teal-700 px-2 py-0.5 text-[10px] font-bold uppercase text-white">
+            Current
+          </span>
+        ) : null}
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] font-semibold text-muted-foreground">
+        <span>{session.dataset_count ?? 0} datasets</span>
+        <span>{session.message_count ?? 0} messages</span>
+      </div>
+      <p className="mt-2 truncate text-[11px] text-slate-500">
+        {session.active_dataset_name || "No dataset uploaded"} · {formatRelativeTime(session.updated_at)}
+      </p>
+    </button>
+  );
+}
+
 function EmptyDatasets() {
   return (
     <div className="rounded-lg border border-dashed border-slate-300 bg-white/64 p-5 text-center">
@@ -697,4 +796,22 @@ function EmptyDatasets() {
 
 function branchName(value?: string) {
   return value ?? "main";
+}
+
+function formatRelativeTime(value: string) {
+  const timestamp = new Date(value).getTime();
+  const deltaSeconds = Math.max(1, Math.round((Date.now() - timestamp) / 1000));
+  if (deltaSeconds < 60) {
+    return "just now";
+  }
+  const deltaMinutes = Math.round(deltaSeconds / 60);
+  if (deltaMinutes < 60) {
+    return `${deltaMinutes}m ago`;
+  }
+  const deltaHours = Math.round(deltaMinutes / 60);
+  if (deltaHours < 24) {
+    return `${deltaHours}h ago`;
+  }
+  const deltaDays = Math.round(deltaHours / 24);
+  return `${deltaDays}d ago`;
 }

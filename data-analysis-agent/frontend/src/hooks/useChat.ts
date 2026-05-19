@@ -1,10 +1,11 @@
-import { useCallback, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
-import { approveConfirmation, rejectConfirmation, streamChat } from "../lib/api";
+import { approveConfirmation, listMessages, rejectConfirmation, streamChat } from "../lib/api";
 import type {
   ChatHistoryMessage,
   ChatStreamEvent,
   ExecutionArtifact,
+  PersistedChatMessage,
   UpdatedDataset,
 } from "../types/api";
 
@@ -78,6 +79,33 @@ export function useChat({
   const [isStreaming, setIsStreaming] = useState(false);
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  const loadedSessionRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!sessionId || isStreaming) {
+      return;
+    }
+
+    let mounted = true;
+    loadedSessionRef.current = sessionId;
+    setPendingConfirmation(null);
+    listMessages(sessionId)
+      .then((response) => {
+        if (!mounted || loadedSessionRef.current !== sessionId) {
+          return;
+        }
+        setMessages(response.messages.map(persistedMessageToChatMessage));
+      })
+      .catch(() => {
+        if (mounted && loadedSessionRef.current === sessionId) {
+          setMessages([]);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [isStreaming, sessionId]);
 
   const artifacts = useMemo(
     () => messages.flatMap((message) => message.artifacts),
@@ -263,6 +291,11 @@ export function useChat({
     setIsStreaming(false);
   }, []);
 
+  const clearMessages = useCallback(() => {
+    setMessages([]);
+    setPendingConfirmation(null);
+  }, []);
+
   return {
     messages,
     isStreaming,
@@ -271,8 +304,46 @@ export function useChat({
     sendMessage,
     confirmPending,
     cancelPending,
+    clearMessages,
     stop,
   };
+}
+
+function persistedMessageToChatMessage(message: PersistedChatMessage): ChatMessage {
+  return {
+    id: message.id,
+    role: message.role === "user" ? "user" : "assistant",
+    content: message.content,
+    status: normalizeStatus(message.status),
+    trace: (message.trace_events ?? []).map((event) => ({
+      id: event.id,
+      type: event.type as ChatStreamEvent["type"],
+      message: event.message ?? undefined,
+      code: event.code ?? undefined,
+      ok: event.ok ?? undefined,
+      stdout: event.stdout ?? undefined,
+      stderr: event.stderr ?? undefined,
+      traceback: event.traceback ?? undefined,
+      resultSummary: event.result_summary ?? undefined,
+      resultPreview: event.result_preview,
+      updatedDatasets: event.updated_datasets,
+      severity: event.severity ?? undefined,
+      source: event.source ?? undefined,
+    })),
+    finalAnswer: message.final_answer ?? undefined,
+    highlights: message.highlights ?? [],
+    keyFindings: message.key_findings ?? [],
+    warnings: message.warnings ?? [],
+    stateChanged: message.state_changed ?? undefined,
+    artifacts: message.artifacts ?? [],
+  };
+}
+
+function normalizeStatus(status: string): ChatMessage["status"] {
+  if (status === "streaming" || status === "error" || status === "waiting_confirmation") {
+    return status;
+  }
+  return "done";
 }
 
 function handleStreamEvent({

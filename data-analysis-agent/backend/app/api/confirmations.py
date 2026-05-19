@@ -13,7 +13,7 @@ from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import AGENT_TOOLS, execution_result_for_model
 from app.api.chat import get_model_client
 from app.db.session import get_session
-from app.models.entities import AnalysisSession, Branch, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
+from app.models.entities import AnalysisSession, Artifact, Branch, ChatMessage, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
 from app.runtime.python_executor import ExecutionResult, PythonExecutor, object_to_record
 from app.schemas.confirmation import ConfirmationActionResponse, ConfirmationRead
 from app.services.introspection import introspect_object
@@ -65,6 +65,7 @@ def approve_confirmation(
 
     events.append(_final_answer_event(confirmation, result, model_client))
     events.append({"type": "message_done"})
+    _persist_confirmation_events(db, confirmation, events)
     return ConfirmationActionResponse(
         confirmation=_confirmation_read(confirmation),
         events=events,
@@ -98,6 +99,7 @@ def reject_confirmation(
         },
         {"type": "message_done"},
     ]
+    _persist_confirmation_events(db, confirmation, events)
     return ConfirmationActionResponse(
         confirmation=_confirmation_read(confirmation),
         events=events,
@@ -189,6 +191,7 @@ def _approve_rollback_confirmation(
         },
         {"type": "message_done"},
     ]
+    _persist_confirmation_events(db, confirmation, events)
     return ConfirmationActionResponse(
         confirmation=_confirmation_read(confirmation),
         events=events,
@@ -264,6 +267,7 @@ def _approve_direct_mutation_confirmation(
             },
             {"type": "message_done"},
         ]
+        _persist_confirmation_events(db, confirmation, events)
         return ConfirmationActionResponse(
             confirmation=_confirmation_read(confirmation),
             events=events,
@@ -286,6 +290,7 @@ def _approve_direct_mutation_confirmation(
             },
             {"type": "message_done"},
         ]
+        _persist_confirmation_events(db, confirmation, events)
         return ConfirmationActionResponse(
             confirmation=_confirmation_read(confirmation),
             events=events,
@@ -440,6 +445,74 @@ def _code_result_event(result: ExecutionResult) -> dict[str, Any]:
         "result_preview": result.result_preview,
         "updated_datasets": [item.model_dump(mode="json") for item in result.updated_datasets],
     }
+
+
+def _persist_confirmation_events(
+    db: Session,
+    confirmation: PendingConfirmation,
+    events: list[dict[str, Any]],
+) -> None:
+    assistant_message_id = (confirmation.tool_arguments or {}).get("assistant_message_id")
+    if not isinstance(assistant_message_id, str):
+        return
+    message = db.get(ChatMessage, assistant_message_id)
+    if message is None:
+        return
+
+    trace_events = list(message.trace_events or [])
+    artifact_ids = [item for item in (message.artifact_ids or []) if isinstance(item, str)]
+    for event in events:
+        event_type = str(event.get("type", "message"))
+        if event_type == "artifact_created":
+            artifact_payload = event.get("artifact")
+            artifact_id = artifact_payload.get("id") if isinstance(artifact_payload, dict) else None
+            if isinstance(artifact_id, str) and artifact_id not in artifact_ids:
+                artifact_ids.append(artifact_id)
+                artifact = db.get(Artifact, artifact_id)
+                if artifact is not None:
+                    metadata = dict(artifact.artifact_metadata or {})
+                    metadata["source_message_id"] = message.id
+                    artifact.artifact_metadata = metadata
+                    db.add(artifact)
+        elif event_type == "final_answer":
+            message.status = "done"
+            message.final_answer = str(event.get("answer") or "")
+            message.state_changed = bool(event.get("state_changed"))
+        elif event_type == "message_done":
+            if message.status == "streaming":
+                message.status = "done"
+        elif event_type in {"trace", "code_started", "code_result_summary", "error"}:
+            trace_events.append(
+                {
+                    "id": new_id(),
+                    "type": event_type,
+                    **{
+                        key: value
+                        for key, value in event.items()
+                        if key
+                        in {
+                            "message",
+                            "code",
+                            "ok",
+                            "stdout",
+                            "stderr",
+                            "traceback",
+                            "result_preview",
+                            "updated_datasets",
+                        }
+                    },
+                }
+            )
+
+    message.artifact_ids = artifact_ids
+    message.trace_events = trace_events
+    message.updated_at = utc_now()
+    session = db.get(AnalysisSession, confirmation.session_id)
+    if session is not None:
+        session.updated_at = utc_now()
+        db.add(session)
+    db.add(message)
+    db.commit()
 
 
 def _final_answer_event(

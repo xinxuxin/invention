@@ -18,13 +18,14 @@ class Settings(BaseSettings):
     verifier_mode: str = "hybrid"
     llm_verifier_enabled: bool = True
     llm_verifier_model: str = "gpt-4.1-mini"
-    llm_verifier_timeout_seconds: int = 6
+    llm_verifier_timeout_seconds: int = 8
     llm_verifier_max_tokens: int = 700
     llm_verifier_max_input_chars: int = 12_000
     llm_verifier_min_confidence: float = 0.70
     llm_verifier_fail_open: bool = True
     llm_verifier_hard_rule_authority: bool = False
     llm_verifier_policy: str = "selective"
+    llm_verifier_complexity_threshold: int = 3
     llm_verifier_conceptual_enabled: bool = True
     llm_verifier_repeat_retry_enabled: bool = True
     llm_verifier_max_calls_per_turn: int = 1

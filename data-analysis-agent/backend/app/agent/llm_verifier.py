@@ -33,6 +33,12 @@ class LLMVerifier:
         force: bool = False,
         calls_this_turn: int = 0,
     ) -> tuple[LLMVerificationResult | None, str | None]:
+        complexity_score = score_task_complexity(
+            user_message,
+            latest_execution_result=execution_result,
+            artifacts=artifacts,
+            deterministic_result=deterministic_result,
+        )
         if not self._allowed(
             user_message,
             deterministic_result,
@@ -40,6 +46,7 @@ class LLMVerifier:
             turn_started_at,
             force=force,
             calls_this_turn=calls_this_turn,
+            complexity_score=complexity_score,
         ):
             return None, self._skip_reason(
                 user_message,
@@ -48,10 +55,11 @@ class LLMVerifier:
                 turn_started_at,
                 force=force,
                 calls_this_turn=calls_this_turn,
+                complexity_score=complexity_score,
             )
 
         try:
-            return self.verify(
+            result = self.verify(
                 user_message=user_message,
                 context=context,
                 execution_result=execution_result,
@@ -59,7 +67,8 @@ class LLMVerifier:
                 state_changed=state_changed,
                 latest_code=latest_code,
                 deterministic_result=deterministic_result,
-            ), None
+            )
+            return result, "Semantic verifier reviewed the result."
         except Exception as exc:
             if self.settings.llm_verifier_fail_open:
                 return None, self._fallback_trace(exc)
@@ -125,6 +134,7 @@ class LLMVerifier:
         turn_started_at: float,
         force: bool = False,
         calls_this_turn: int = 0,
+        complexity_score: int = 0,
     ) -> bool:
         mode = self.settings.verifier_mode.lower()
         if not self.settings.llm_verifier_enabled or mode not in {"llm", "hybrid"}:
@@ -145,6 +155,8 @@ class LLMVerifier:
             return True
         if force:
             return self.settings.llm_verifier_repeat_retry_enabled
+        if complexity_score >= self.settings.llm_verifier_complexity_threshold:
+            return True
         if self.settings.llm_verifier_conceptual_enabled and _semantic_verification_priority(user_message):
             return True
         if deterministic_result.severity in {"retry", "finalize_with_warning"} and not _deterministic_retry_is_authoritative(deterministic_result):
@@ -159,6 +171,7 @@ class LLMVerifier:
         turn_started_at: float,
         force: bool = False,
         calls_this_turn: int = 0,
+        complexity_score: int = 0,
     ) -> str | None:
         if not self.settings.show_verifier_debug_trace:
             return None
@@ -263,6 +276,37 @@ def _semantic_verification_priority(user_message: str) -> bool:
             "invalid dates",
         )
     )
+
+
+def score_task_complexity(
+    user_message: str,
+    *,
+    latest_execution_result: ExecutionResult | None,
+    artifacts: list[ExecutionArtifact],
+    deterministic_result: VerificationResult,
+) -> int:
+    lowered = user_message.lower()
+    score = 0
+    if any(marker in lowered for marker in (" and ", " also ", " then ", " as well as ", "table and chart", "export and summarize")):
+        score += 2
+    if "table" in lowered and any(marker in lowered for marker in ("chart", "graph", "plot", "visualize")):
+        score += 2
+    if _semantic_verification_priority(user_message):
+        score += 2
+    if any(marker in lowered for marker in ("compare datasets", "both datasets", "join", "original vs", "dataset a and dataset b")):
+        score += 2
+    if any(marker in lowered for marker in ("compare current branch", "rollback", "fork", "what changed")):
+        score += 2
+    if deterministic_result.severity in {"retry", "finalize_with_warning"} and not _deterministic_retry_is_authoritative(deterministic_result):
+        score += 2
+    if artifacts and deterministic_result.metadata.get("intent_uncertain"):
+        score += 2
+    if deterministic_result.severity == "retry":
+        score += 2
+    preview = latest_execution_result.result_preview if latest_execution_result is not None else None
+    if isinstance(preview, (dict, list)) and len(json.dumps(preview, default=str)) > 2500:
+        score += 1
+    return score
 
 
 def _parse_llm_json(text: str) -> dict[str, Any]:

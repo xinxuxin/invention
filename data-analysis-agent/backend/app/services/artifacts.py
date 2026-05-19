@@ -65,6 +65,7 @@ def artifact_read(artifact: Artifact) -> ArtifactRead:
         chart_spec=chart_spec if isinstance(chart_spec, dict) else None,
         download_url=f"/api/sessions/{artifact.session_id}/artifacts/{artifact.id}/download",
         source_message_id=str(source_message_id) if source_message_id is not None else None,
+        status=str(metadata.get("status")) if metadata.get("status") is not None else None,
         path=artifact.path,
         metadata=metadata,
         created_at=artifact.created_at,

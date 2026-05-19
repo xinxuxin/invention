@@ -16,6 +16,7 @@ class ArtifactRead(BaseModel):
     chart_spec: dict[str, Any] | None = None
     download_url: str | None = None
     source_message_id: str | None = None
+    status: str | None = None
     path: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime

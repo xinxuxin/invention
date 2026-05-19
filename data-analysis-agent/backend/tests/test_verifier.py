@@ -545,7 +545,7 @@ def test_llm_verifier_missing_fields_get_defaults() -> None:
         turn_started_at=time.monotonic(),
     )
 
-    assert trace is None
+    assert trace == "Semantic verifier reviewed the result."
     assert llm is not None
     assert llm.passed is True
     assert llm.confidence == 0.0
@@ -576,8 +576,67 @@ def test_llm_verifier_schema_question_not_skipped_by_time_budget() -> None:
         turn_started_at=time.monotonic() - 5,
     )
 
-    assert trace is None
+    assert trace == "Semantic verifier reviewed the result."
     assert llm is not None
+    assert client.calls == 1
+
+
+def test_llm_verifier_runs_for_compound_complex_task() -> None:
+    settings = Settings(
+        openai_api_key="test",
+        llm_verifier_enabled=True,
+        verifier_mode="hybrid",
+        llm_verifier_policy="selective",
+        llm_verifier_complexity_threshold=3,
+    )
+    deterministic = ResultVerifier().verify(
+        user_message="Show top countries as a table and create a bar chart",
+        execution_result=_execution(result_preview={"ok": True}),
+        artifacts_created_this_turn=[
+            _artifact(
+                "table",
+                columns=[{"key": "country"}, {"key": "record_count"}],
+                metadata={"rows": [{"country": "US", "record_count": 10}]},
+            ),
+            ExecutionArtifact(
+                id="chart-1",
+                name="Country chart",
+                kind="chart",
+                type="chart",
+                title="Country chart",
+                chart_spec={
+                    "chart_type": "bar",
+                    "data": [{"country": "US", "record_count": 10}],
+                    "x": "country",
+                    "y": "record_count",
+                },
+                path="/tmp/chart",
+                metadata={},
+            ),
+        ],
+    )
+    client = _PartialJsonClient()
+
+    llm, trace = LLMVerifier(settings=settings, client=client).verify_if_allowed(
+        user_message="Show top countries as a table and create a bar chart",
+        context={},
+        execution_result=_execution(result_preview={"ok": True}),
+        artifacts=[
+            _artifact(
+                "table",
+                columns=[{"key": "country"}, {"key": "record_count"}],
+                metadata={"rows": [{"country": "US", "record_count": 10}]},
+            )
+        ],
+        state_changed=False,
+        latest_code=None,
+        deterministic_result=deterministic,
+        current_step=1,
+        turn_started_at=time.monotonic(),
+    )
+
+    assert llm is not None
+    assert trace == "Semantic verifier reviewed the result."
     assert client.calls == 1
 
 

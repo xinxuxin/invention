@@ -4,6 +4,7 @@ import type {
   BranchListResponse,
   ChatStreamEvent,
   ChatStreamRequest,
+  ChatMessageListResponse,
   ConfirmationActionResponse,
   DatasetListResponse,
   DatasetUploadResponse,
@@ -56,6 +57,15 @@ export async function listSessions(): Promise<SessionListResponse> {
 
 export async function listDatasets(sessionId: string): Promise<DatasetListResponse> {
   return request<DatasetListResponse>(`/api/sessions/${sessionId}/datasets`);
+}
+
+export async function listMessages(sessionId: string): Promise<ChatMessageListResponse> {
+  return request<ChatMessageListResponse>(`/api/sessions/${sessionId}/messages`);
+}
+
+export async function listArtifacts(sessionId: string, includeAll = false): Promise<ExecutionArtifact[]> {
+  const suffix = includeAll ? "?include_all=true" : "";
+  return request<ExecutionArtifact[]>(`/api/sessions/${sessionId}/artifacts${suffix}`);
 }
 
 export async function activateDataset(sessionId: string, datasetId: string): Promise<AnalysisSession> {

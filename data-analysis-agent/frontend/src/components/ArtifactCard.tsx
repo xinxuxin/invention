@@ -152,8 +152,16 @@ function TableArtifact({ artifact, content }: { artifact: ExecutionArtifact; con
             {table.rowCount.toLocaleString()} total rows
           </span>
           <span className="rounded-full bg-slate-100 px-2 py-1">
+            {table.totalColumnCount.toLocaleString()} columns
+          </span>
+          <span className="rounded-full bg-slate-100 px-2 py-1">
             showing {visibleRows.length.toLocaleString()}
           </span>
+          {table.hiddenColumns.length > 0 ? (
+            <span className="rounded-full bg-indigo-50 px-2 py-1 text-indigo-800">
+              Showing {table.previewColumnCount} of {table.totalColumnCount} columns
+            </span>
+          ) : null}
           {table.truncated ? (
             <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-800">preview truncated</span>
           ) : null}
@@ -488,6 +496,9 @@ type TableContent = {
   rows: Record<string, unknown>[];
   previewRows: Record<string, unknown>[];
   rowCount: number;
+  totalColumnCount: number;
+  previewColumnCount: number;
+  hiddenColumns: string[];
   truncated: boolean;
 };
 
@@ -504,6 +515,9 @@ function normalizeTableContent(content: unknown, artifact: ExecutionArtifact): T
       rows,
       previewRows: rows.slice(0, 50),
       rowCount: rows.length,
+      totalColumnCount: metadataColumns.length || deriveColumns(rows).length,
+      previewColumnCount: metadataColumns.length || deriveColumns(rows).length,
+      hiddenColumns: hiddenColumnsFromMetadata(artifact.metadata),
       truncated: false,
     };
   }
@@ -524,6 +538,13 @@ function normalizeTableContent(content: unknown, artifact: ExecutionArtifact): T
       ? metadataColumns
       : deriveColumns(rows.length ? rows : previewRows);
   const rowCount = typeof content.row_count === "number" ? content.row_count : rows.length || previewRows.length;
+  const totalColumnCount =
+    typeof content.total_column_count === "number"
+      ? content.total_column_count
+      : typeof content.column_count === "number"
+        ? content.column_count
+        : allColumns.length || columns.length;
+  const hiddenColumns = hiddenColumnsFromMetadata(content.hidden_columns ?? artifact.metadata.hidden_columns);
 
   return {
     title: typeof content.title === "string" ? content.title : artifactTitle(artifact),
@@ -532,8 +553,23 @@ function normalizeTableContent(content: unknown, artifact: ExecutionArtifact): T
     rows,
     previewRows,
     rowCount,
+    totalColumnCount,
+    previewColumnCount:
+      typeof content.preview_column_count === "number"
+        ? content.preview_column_count
+        : typeof content.display_column_count === "number"
+          ? content.display_column_count
+          : columns.length,
+    hiddenColumns,
     truncated: Boolean(content.truncated),
   };
+}
+
+function hiddenColumnsFromMetadata(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function parseChartSpec(spec: unknown): ChartSpec | null {

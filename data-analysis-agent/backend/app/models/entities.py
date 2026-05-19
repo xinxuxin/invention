@@ -83,6 +83,25 @@ class Artifact(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
+class ChatMessage(SQLModel, table=True):
+    __tablename__ = "chat_messages"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    session_id: str = Field(foreign_key="analysis_sessions.id", index=True)
+    role: str = Field(index=True)
+    content: str = ""
+    status: str = Field(default="done", index=True)
+    final_answer: str | None = None
+    highlights: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    key_findings: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    warnings: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    state_changed: bool | None = None
+    artifact_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    trace_events: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utc_now, nullable=False)
+    updated_at: datetime = Field(default_factory=utc_now, nullable=False)
+
+
 class PendingConfirmation(SQLModel, table=True):
     __tablename__ = "pending_confirmations"
 

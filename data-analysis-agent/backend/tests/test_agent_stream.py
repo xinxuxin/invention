@@ -299,9 +299,9 @@ def test_chat_rollback_requires_confirmation_and_approval_creates_version(client
             _tool_response(
                 "execute_python",
                 {
-                    "code": "data['double'] = data['value'] * 2\npreview(data)",
+                    "code": "data.drop(columns=['value'], inplace=True)\npreview(data)",
                     "mutates_state": True,
-                    "mutation_summary": "Add double column",
+                    "mutation_summary": "Drop value column",
                 },
             ),
             _tool_response("final_answer", {"answer": "Added a double column.", "state_changed": True}),
@@ -440,6 +440,83 @@ def test_chart_artifact_streams_with_valid_spec(client: TestClient) -> None:
     assert content["title"] == "Group totals"
     assert content["chart_spec"]["x"] == "group"
     assert content["chart_spec"]["y"] == "value"
+
+
+def test_chat_messages_and_artifacts_are_persisted_for_restore(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "rows = data.head(2)",
+                            "save_table('Restored preview', rows)",
+                            "RESULT = {'rows': len(rows)}",
+                        ]
+                    )
+                },
+            ),
+            _tool_response("final_answer", {"answer": "I created the preview table.", "state_changed": False}),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    stream_response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Show a preview table", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(stream_response.text)
+    artifact_id = next(event["artifact"]["id"] for event in events if event["type"] == "artifact_created")
+
+    messages_response = client.get(f"/api/sessions/{session_id}/messages")
+    messages = messages_response.json()["messages"]
+    sessions_response = client.get("/api/sessions")
+    artifacts_response = client.get(f"/api/sessions/{session_id}/artifacts")
+
+    assert messages_response.status_code == 200
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[0]["content"] == "Show a preview table"
+    assert "table" in messages[1]["final_answer"].lower()
+    assert messages[1]["trace_events"]
+    assert messages[1]["artifact_ids"] == [artifact_id]
+    assert messages[1]["artifacts"][0]["id"] == artifact_id
+    assert sessions_response.json()["sessions"][0]["message_count"] == 2
+    assert artifacts_response.json()[0]["id"] == artifact_id
+
+
+def test_confirmation_response_updates_persisted_assistant_message(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "data.drop(columns=['value'], inplace=True)\npreview(data)",
+                    "mutates_state": True,
+                    "mutation_summary": "Drop value column",
+                },
+            )
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Drop the value column", "active_dataset_id": dataset_id},
+    )
+    confirmation = next(event for event in _parse_sse(response.text) if event["type"] == "confirmation_required")
+
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+    messages = client.get(f"/api/sessions/{session_id}/messages").json()["messages"]
+
+    assert approve_response.status_code == 200
+    assert messages[-1]["status"] == "done"
+    assert messages[-1]["state_changed"] is True
+    assert "Saved" in messages[-1]["final_answer"] or "Applied" in messages[-1]["final_answer"]
 
 
 def test_agent_context_and_executor_include_multiple_datasets(client: TestClient) -> None:

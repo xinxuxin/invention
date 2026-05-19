@@ -166,7 +166,9 @@ function AssistantMessage({
 
       {isStreaming ? <ThinkingProgress progress={progress} /> : null}
 
-      {message.trace.length > 0 ? <TracePanel trace={message.trace} isStreaming={isStreaming} /> : null}
+      {message.trace.length > 0 ? (
+        <TracePanel trace={message.trace} isStreaming={isStreaming} defaultOpen={isStreaming} />
+      ) : null}
 
       {pendingConfirmation?.assistantMessageId === message.id ? (
         <ConfirmationCard pending={pendingConfirmation} onConfirm={onConfirm} onCancel={onCancel} />
@@ -248,12 +250,26 @@ function ThinkingProgress({ progress }: { progress: AgentProgress }) {
   );
 }
 
-function TracePanel({ trace, isStreaming }: { trace: ChatTraceEvent[]; isStreaming: boolean }) {
-  const [open, setOpen] = useState(true);
+function TracePanel({
+  trace,
+  isStreaming,
+  defaultOpen,
+}: {
+  trace: ChatTraceEvent[];
+  isStreaming: boolean;
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
   const [hasNewTraceWhileCollapsed, setHasNewTraceWhileCollapsed] = useState(false);
   const lastTraceIdRef = useRef<string | null>(null);
   const latest = trace[trace.length - 1];
   const latestId = latest?.id;
+
+  useEffect(() => {
+    if (isStreaming) {
+      setOpen(true);
+    }
+  }, [isStreaming]);
 
   useEffect(() => {
     if (!latestId) {

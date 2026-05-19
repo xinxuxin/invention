@@ -28,6 +28,11 @@ export type AnalysisSession = {
   name: string | null;
   active_branch_id: string | null;
   active_dataset_id: string | null;
+  active_version_id?: string | null;
+  dataset_count?: number;
+  message_count?: number;
+  active_dataset_name?: string | null;
+  active_branch_name?: string | null;
   created_at: string;
   updated_at: string;
   branches: Branch[];
@@ -144,9 +149,48 @@ export type ExecutionArtifact = {
   payload?: Record<string, unknown> | null;
   download_url?: string | null;
   source_message_id?: string | null;
+  status?: string | null;
   path: string;
   metadata: Record<string, unknown>;
   created_at?: string | null;
+};
+
+export type PersistedChatTraceEvent = {
+  id: string;
+  type: ChatStreamEvent["type"] | string;
+  message?: string | null;
+  code?: string | null;
+  ok?: boolean | null;
+  stdout?: string | null;
+  stderr?: string | null;
+  traceback?: string | null;
+  result_summary?: Record<string, unknown> | null;
+  result_preview?: unknown;
+  updated_datasets?: UpdatedDataset[];
+  severity?: string | null;
+  source?: string | null;
+};
+
+export type PersistedChatMessage = {
+  id: string;
+  session_id: string;
+  role: "user" | "assistant" | string;
+  content: string;
+  status: "streaming" | "done" | "error" | "waiting_confirmation" | string;
+  final_answer?: string | null;
+  highlights?: Array<Record<string, unknown>>;
+  key_findings?: string[];
+  warnings?: string[];
+  state_changed?: boolean | null;
+  artifact_ids?: string[];
+  trace_events?: PersistedChatTraceEvent[];
+  artifacts?: ExecutionArtifact[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatMessageListResponse = {
+  messages: PersistedChatMessage[];
 };
 
 export type ExportResponse = {
