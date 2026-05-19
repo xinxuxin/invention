@@ -31,7 +31,9 @@ make dev
 - `POST /api/sessions/{session_id}/versions/{version_id}/rollback` restores a version by creating a new rollback node.
 - `POST /api/sessions/{session_id}/versions/{version_id}/fork` creates and checks out a new branch from a version.
 - `GET /api/sessions/{session_id}/history` returns the branch/version timeline.
+- `POST /api/sessions/{session_id}/export` creates a CSV artifact for the current dataset/version.
 - `POST /api/sessions/{session_id}/chat/stream` streams general-purpose coding agent events over Server-Sent Events.
+- `GET /api/sessions/{session_id}/artifacts/{artifact_id}/download` downloads a generated artifact.
 
 ## Python Execution Runtime
 
@@ -43,6 +45,17 @@ Helper functions available inside executed code:
 - `save_table(name, dataframe_or_records)`
 - `save_chart(name, chart_spec)`
 - `save_csv(name, dataframe_or_records)`
+
+## CSV Export
+
+`POST /api/sessions/{session_id}/export` exports the current dataset snapshot for the active
+branch/version, or a requested dataset/version, as a CSV artifact. It handles DataFrames, Series,
+ndarrays, records, nested JSON-like mappings/sequences through generic pandas conversion and
+`json_normalize` where appropriate. If a value cannot be represented usefully as CSV, the backend
+returns a clear explanation and stores a JSON fallback artifact internally.
+
+Agent-created intermediate exports should use `save_csv()` with `mutates_state=false`, so filtered
+or preview tables can be downloaded without changing the branch state.
 
 ## Coding Agent
 

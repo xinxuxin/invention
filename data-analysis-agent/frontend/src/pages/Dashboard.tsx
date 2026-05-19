@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import {
   Activity,
   Database,
+  FileDown,
   GitBranch,
   GitFork,
   Layers3,
@@ -37,6 +38,7 @@ export function Dashboard() {
   });
   const isOnline = health.status === "online";
   const branch = workspace.activeBranch;
+  const artifacts = [...workspace.exportArtifacts, ...chat.artifacts];
 
   return (
     <main className="min-h-screen p-4 text-foreground sm:p-6 lg:p-8">
@@ -75,6 +77,14 @@ export function Dashboard() {
             <Button variant="secondary" disabled={!workspace.session}>
               <Upload className="h-4 w-4" />
               Upload ready
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={!workspace.activeDataset || workspace.exportStatus === "exporting"}
+              onClick={() => void workspace.exportCurrentDataset()}
+            >
+              <FileDown className="h-4 w-4" />
+              {workspace.exportStatus === "exporting" ? "Exporting" : "Export CSV"}
             </Button>
             <Button
               disabled={!workspace.session}
@@ -257,6 +267,40 @@ export function Dashboard() {
 
               <ProfileInspector dataset={workspace.activeDataset} />
 
+              <div className="rounded-lg border border-border bg-white/72 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 text-sm font-bold">
+                      <FileDown className="h-4 w-4 text-teal-700" />
+                      CSV export
+                    </div>
+                    <p className="mt-2 text-sm leading-5 text-muted-foreground">
+                      Export the active dataset exactly as it exists on the current branch.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="h-8 px-3 text-xs"
+                    disabled={!workspace.activeDataset || workspace.exportStatus === "exporting"}
+                    onClick={() => void workspace.exportCurrentDataset()}
+                  >
+                    {workspace.exportStatus === "exporting" ? "Working" : "Export"}
+                  </Button>
+                </div>
+                {workspace.exportMessage ? (
+                  <p
+                    className={`mt-3 rounded-md p-2 text-xs font-semibold ${
+                      workspace.exportStatus === "error"
+                        ? "bg-rose-50 text-rose-700"
+                        : "bg-teal-50 text-teal-900"
+                    }`}
+                  >
+                    {workspace.exportMessage}
+                  </p>
+                ) : null}
+              </div>
+
               {workspace.selectedVersion ? (
                 <CollapsibleCard
                   title={workspace.selectedVersion.mutation_summary ?? workspace.selectedVersion.label}
@@ -302,13 +346,13 @@ export function Dashboard() {
 
               <CollapsibleCard
                 title="Artifacts"
-                eyebrow={`${chat.artifacts.length} generated`}
+                eyebrow={`${artifacts.length} generated`}
                 icon={<PanelRight className="h-4 w-4" />}
-                defaultOpen={chat.artifacts.length > 0}
+                defaultOpen={artifacts.length > 0}
               >
-                {chat.artifacts.length > 0 && workspace.session ? (
+                {artifacts.length > 0 && workspace.session ? (
                   <div className="space-y-3">
-                    {chat.artifacts.map((artifact) =>
+                    {artifacts.map((artifact) =>
                       workspace.session ? (
                         <ArtifactCard
                           key={artifact.id}

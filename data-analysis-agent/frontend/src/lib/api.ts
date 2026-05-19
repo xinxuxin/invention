@@ -7,6 +7,7 @@ import type {
   DatasetListResponse,
   DatasetUploadResponse,
   ExecutionArtifact,
+  ExportResponse,
   HealthResponse,
   HistoryResponse,
   VersionActionResponse,
@@ -87,6 +88,17 @@ export async function forkVersion(
 
 export async function getHistory(sessionId: string): Promise<HistoryResponse> {
   return request<HistoryResponse>(`/api/sessions/${sessionId}/history`);
+}
+
+export async function exportDataset(
+  sessionId: string,
+  payload: { dataset_id?: string | null; version_id?: string | null; name?: string | null },
+): Promise<ExportResponse> {
+  return request<ExportResponse>(`/api/sessions/${sessionId}/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export function uploadDatasets(

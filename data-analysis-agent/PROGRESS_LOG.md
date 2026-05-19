@@ -67,3 +67,16 @@
 - Verified backend tests pass: `22 passed`.
 - Verified backend lint passes: `ruff check .`.
 - Verified frontend build passes: `npm run build`.
+- Started CSV export phase.
+- Added artifact response schemas and shared artifact persistence helpers so direct exports and agent artifacts use the same metadata/download shape.
+- Added CSV export conversion service for DataFrames, Series, ndarrays, list/dict/nested JSON-like objects, and public-attribute custom objects, with JSON fallback artifacts for values that cannot become useful CSV.
+- Added `POST /api/sessions/{session_id}/export` for exporting the active dataset/current version or a requested dataset/version.
+- Tightened artifact downloads with stable filenames and CSV media type handling.
+- Updated runtime `save_csv()` artifacts to include generated timestamps in streamed artifact events.
+- Added backend CSV export tests for mutated current-branch export, list-of-dicts normalization, and intermediate agent export without state mutation.
+- Added frontend export button for the active dataset and CSV artifact cards with filename, row count, generated time, preview, and download action.
+- Fixed collapsible cards to open when newly generated artifacts appear.
+- Browser smoke-tested CSV export: exported a DataFrame, saw success messaging, row metadata, CSV preview, and download card.
+- Verified backend tests pass: `25 passed`.
+- Verified backend lint passes: `ruff check .`.
+- Verified frontend build passes: `npm run build`.

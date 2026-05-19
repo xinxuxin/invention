@@ -21,23 +21,22 @@ import pandas as pd
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode, new_id, utc_now
+from app.models.entities import AnalysisSession, Branch, Dataset, VersionNode, new_id, utc_now
+from app.services.artifacts import persist_artifact
 from app.services.introspection import introspect_object
 from app.services.versioning import latest_versions_for_branch, sync_branch_pointer
-from app.storage.files import artifacts_root, load_pickle, save_snapshot
+from app.storage.files import load_pickle, save_snapshot
 
 DEFAULT_TIMEOUT_SECONDS = 5
 DEFAULT_MAX_STDOUT = 20_000
 DEFAULT_MAX_PREVIEW = 12_000
-MAX_ARTIFACT_BYTES = 2_000_000
-
-
 class ExecutionArtifact(BaseModel):
     id: str
     name: str
     kind: str
     path: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
 
 
 class UpdatedDataset(BaseModel):
@@ -321,30 +320,19 @@ class PythonExecutor:
         artifact_payloads: Sequence[Mapping[str, Any]],
     ) -> list[ExecutionArtifact]:
         persisted: list[ExecutionArtifact] = []
-        root = artifacts_root(session_id)
-
         for payload in artifact_payloads:
-            artifact_id = new_id()
-            name = str(payload.get("name") or f"artifact-{artifact_id}")
+            name = str(payload.get("name") or "artifact")
             kind = str(payload.get("kind") or "artifact")
-            extension = _artifact_extension(kind)
-            path = root / f"{artifact_id}-{_safe_artifact_name(name)}.{extension}"
             content = payload.get("content", "")
-            if isinstance(content, bytes):
-                path.write_bytes(content[:MAX_ARTIFACT_BYTES])
-            else:
-                path.write_text(str(content)[:MAX_ARTIFACT_BYTES], encoding="utf-8")
-
             metadata = _json_safe(payload.get("metadata", {}))
-            artifact = Artifact(
-                id=artifact_id,
-                session_id=session_id,
+            artifact = persist_artifact(
+                self.db,
                 name=name,
                 kind=kind,
-                path=str(path),
-                artifact_metadata=metadata if isinstance(metadata, dict) else {"metadata": metadata},
+                session_id=session_id,
+                content=content if isinstance(content, bytes) else str(content),
+                metadata=metadata if isinstance(metadata, dict) else {"metadata": metadata},
             )
-            self.db.add(artifact)
             persisted.append(
                 ExecutionArtifact(
                     id=artifact.id,
@@ -352,11 +340,9 @@ class PythonExecutor:
                     kind=artifact.kind,
                     path=artifact.path,
                     metadata=artifact.artifact_metadata,
+                    created_at=artifact.created_at.isoformat(),
                 )
             )
-
-        if persisted:
-            self.db.commit()
 
         return persisted
 
@@ -671,19 +657,6 @@ def _dataset_keys(rows: Sequence[Dataset]) -> dict[str, str]:
         used.add(key)
 
     return keys
-
-
-def _artifact_extension(kind: str) -> str:
-    if kind == "csv":
-        return "csv"
-    if kind in {"table", "chart"}:
-        return "json"
-    return "txt"
-
-
-def _safe_artifact_name(name: str) -> str:
-    sanitized = "".join(character if character.isalnum() or character in {"-", "_"} else "-" for character in name)
-    return sanitized.strip("-")[:80] or "artifact"
 
 
 def _mp_context() -> mp.context.BaseContext:

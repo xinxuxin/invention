@@ -10,7 +10,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Download, FileJson2, Table2 } from "lucide-react";
+import { CalendarClock, Download, FileJson2, Table2 } from "lucide-react";
 
 import { artifactDownloadUrl, getArtifactContent } from "../lib/api";
 import type { ExecutionArtifact } from "../types/api";
@@ -57,7 +57,16 @@ export function ArtifactCard({ sessionId, artifact }: ArtifactCardProps) {
             )}
             <span className="truncate">{artifact.name}</span>
           </div>
-          <p className="mt-1 text-xs uppercase tracking-wide text-muted-foreground">{artifact.kind}</p>
+          <p className="mt-1 text-xs uppercase tracking-wide text-muted-foreground">
+            {artifact.kind}
+            {rowCount(artifact.metadata) ? ` - ${rowCount(artifact.metadata)} rows` : ""}
+          </p>
+          {artifact.created_at ? (
+            <p className="mt-1 flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+              <CalendarClock className="h-3 w-3" />
+              {formatDate(artifact.created_at)}
+            </p>
+          ) : null}
         </div>
         {artifact.kind === "csv" ? (
           <a
@@ -191,4 +200,18 @@ function formatCell(value: unknown) {
     return JSON.stringify(value);
   }
   return String(value);
+}
+
+function rowCount(metadata: Record<string, unknown>) {
+  const rows = metadata.rows;
+  return typeof rows === "number" || typeof rows === "string" ? String(rows) : null;
+}
+
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
 }

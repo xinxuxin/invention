@@ -4,6 +4,7 @@ import {
   checkoutBranch,
   createBranch as createBranchRequest,
   createSession,
+  exportDataset,
   forkVersion as forkVersionRequest,
   getHistory,
   getSession,
@@ -11,7 +12,7 @@ import {
   rollbackVersion as rollbackVersionRequest,
   uploadDatasets,
 } from "../lib/api";
-import type { AnalysisSession, Branch, Dataset, HistoryVersion } from "../types/api";
+import type { AnalysisSession, Branch, Dataset, ExecutionArtifact, HistoryVersion } from "../types/api";
 
 type UploadStatus = "idle" | "uploading" | "success" | "error";
 
@@ -43,6 +44,9 @@ export function useWorkspace() {
   const [activeDatasetId, setActiveDatasetId] = useState<string | null>(null);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [historyAction, setHistoryAction] = useState<string | null>(null);
+  const [exportArtifacts, setExportArtifacts] = useState<ExecutionArtifact[]>([]);
+  const [exportStatus, setExportStatus] = useState<"idle" | "exporting" | "success" | "error">("idle");
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<"loading" | "ready" | "error">("loading");
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [upload, setUpload] = useState<UploadState>(initialUploadState);
@@ -237,6 +241,30 @@ export function useWorkspace() {
     [refreshWorkspace, session],
   );
 
+  const exportCurrentDataset = useCallback(async () => {
+    if (!session || !activeDataset) {
+      return;
+    }
+
+    setExportStatus("exporting");
+    setExportMessage("Creating CSV artifact...");
+    try {
+      const response = await exportDataset(session.id, {
+        dataset_id: activeDataset.id,
+        name: `${activeDataset.original_filename}-current-branch`,
+      });
+      if (response.artifact) {
+        const artifact = response.artifact;
+        setExportArtifacts((current) => [artifact, ...current]);
+      }
+      setExportStatus(response.ok ? "success" : "error");
+      setExportMessage(response.message);
+    } catch (error: unknown) {
+      setExportStatus("error");
+      setExportMessage(error instanceof Error ? error.message : "Export failed");
+    }
+  }, [activeDataset, session]);
+
   return {
     session,
     sessionStatus,
@@ -250,6 +278,9 @@ export function useWorkspace() {
     selectedVersionId,
     setSelectedVersionId,
     historyAction,
+    exportArtifacts,
+    exportStatus,
+    exportMessage,
     setActiveDatasetId,
     upload,
     uploadFiles,
@@ -259,6 +290,7 @@ export function useWorkspace() {
     checkoutBranch: checkout,
     rollbackVersion: rollback,
     forkVersion,
+    exportCurrentDataset,
   };
 }
 

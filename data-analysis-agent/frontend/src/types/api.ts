@@ -119,6 +119,13 @@ export type ExecutionArtifact = {
   kind: "table" | "chart" | "csv" | string;
   path: string;
   metadata: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type ExportResponse = {
+  artifact: ExecutionArtifact | null;
+  message: string;
+  ok: boolean;
 };
 
 export type UpdatedDataset = {

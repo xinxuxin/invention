@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { cn } from "../lib/utils";
@@ -21,6 +21,12 @@ export function CollapsibleCard({
   actions,
 }: CollapsibleCardProps) {
   const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    if (defaultOpen) {
+      setOpen(true);
+    }
+  }, [defaultOpen]);
 
   return (
     <section className="overflow-hidden rounded-lg border border-border bg-white/74">

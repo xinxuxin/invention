@@ -12,6 +12,7 @@ This repository currently contains the initial scaffold:
 - Python execution runtime for agent-generated code with stdout/traceback capture, state mutation snapshots, and table/chart/CSV artifact helpers
 - General-purpose coding agent loop with minimal tools and Server-Sent Events trace streaming
 - Append-only branch/fork/rollback history over persisted dataset snapshots
+- CSV export for current branch datasets and agent-created intermediate results
 - React + Vite + TypeScript frontend shell
 - Tailwind styling with shadcn-inspired primitives
 - Frontend health check against the backend
@@ -62,6 +63,8 @@ Backend helper scripts are available through `make dev`, `make test`, and `make 
 - `POST /api/sessions/{session_id}/versions/{version_id}/rollback`
 - `POST /api/sessions/{session_id}/versions/{version_id}/fork`
 - `GET /api/sessions/{session_id}/history`
+- `POST /api/sessions/{session_id}/export`
+- `GET /api/sessions/{session_id}/artifacts/{artifact_id}/download`
 - `POST /api/sessions/{session_id}/chat/stream`
 
 The chat stream endpoint returns Server-Sent Events such as `message_started`, `trace`,
@@ -96,6 +99,9 @@ Runtime helper functions available to executed code:
 - `save_table(name, dataframe_or_records)`
 - `save_chart(name, chart_spec)`
 - `save_csv(name, dataframe_or_records)`
+
+The export endpoint and `save_csv()` both create stable CSV artifacts backed by filesystem storage
+and artifact metadata.
 
 ## Agent
 

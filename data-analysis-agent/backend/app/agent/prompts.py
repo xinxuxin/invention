@@ -19,6 +19,8 @@ Rules:
 - Ask for confirmation before destructive mutations, broad overwrites, deletes, irreversible
   transformations, or operations that could discard user data.
 - Create artifacts for useful tables, charts, or CSV exports.
+- For CSV export requests, use save_csv() on the current, filtered, or intermediate result. Do not
+  set mutates_state=true unless the user explicitly asks to change the dataset.
 - For write operations, indicate whether state was changed.
 - Understand branch/history requests such as rollback, fork, compare branches, and what changed since
   the last mutation. Use the context version summaries to explain history, and do not invent fixed
