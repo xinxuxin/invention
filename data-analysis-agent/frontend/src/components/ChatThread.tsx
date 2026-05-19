@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -8,6 +8,7 @@ import {
   Code2,
   Loader2,
   MessageSquare,
+  Radio,
   ShieldCheck,
   Sparkles,
   TerminalSquare,
@@ -34,12 +35,54 @@ export function ChatThread({
   onConfirm,
   onCancel,
 }: ChatThreadProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
+  const [nearBottom, setNearBottom] = useState(true);
+  const [showNewUpdates, setShowNewUpdates] = useState(false);
+  const activityKey = useMemo(() => messageActivityKey(messages), [messages]);
+  const hasStreamingMessage = messages.some((message) => message.status === "streaming");
+
+  useEffect(() => {
+    const parent = getScrollParent(containerRef.current);
+    if (!parent) {
+      return;
+    }
+
+    const updatePosition = () => {
+      const nextNearBottom = isNearScrollBottom(parent);
+      setNearBottom(nextNearBottom);
+      if (nextNearBottom) {
+        setShowNewUpdates(false);
+      }
+    };
+
+    updatePosition();
+    parent.addEventListener("scroll", updatePosition, { passive: true });
+    return () => parent.removeEventListener("scroll", updatePosition);
+  }, []);
+
+  useEffect(() => {
+    const latestMessage = messages[messages.length - 1];
+    if (!hasStreamingMessage && !latestMessage?.finalAnswer) {
+      return;
+    }
+
+    const parent = getScrollParent(containerRef.current);
+    const shouldScroll = parent ? isNearScrollBottom(parent) || nearBottom : nearBottom;
+    if (shouldScroll) {
+      endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      setShowNewUpdates(false);
+    } else if (hasStreamingMessage) {
+      setShowNewUpdates(true);
+    }
+  }, [activityKey, hasStreamingMessage, messages, nearBottom]);
+
   if (messages.length === 0) {
     return <ChatEmptyState />;
   }
 
   return (
-    <div className="space-y-4">
+    <div ref={containerRef} className="relative space-y-4">
       {messages.map((message, index) => (
         <motion.div
           key={message.id}
@@ -60,6 +103,20 @@ export function ChatThread({
           )}
         </motion.div>
       ))}
+      <div ref={endRef} />
+      {showNewUpdates ? (
+        <button
+          type="button"
+          className="sticky bottom-3 left-full z-10 ml-auto flex w-fit items-center gap-2 rounded-full border border-teal-200 bg-white/95 px-3 py-2 text-xs font-bold text-teal-800 shadow-lg shadow-teal-900/10 backdrop-blur"
+          onClick={() => {
+            endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+            setShowNewUpdates(false);
+          }}
+        >
+          <Radio className="h-3.5 w-3.5" />
+          New updates
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -89,6 +146,9 @@ function AssistantMessage({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const isStreaming = message.status === "streaming";
+  const progress = agentProgress(message);
+
   return (
     <div className="max-w-[92%] space-y-3">
       <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-muted-foreground">
@@ -104,18 +164,12 @@ function AssistantMessage({
         ) : null}
       </div>
 
-      {message.trace.length > 0 ? <TracePanel trace={message.trace} /> : null}
+      {isStreaming ? <ThinkingProgress progress={progress} /> : null}
+
+      {message.trace.length > 0 ? <TracePanel trace={message.trace} isStreaming={isStreaming} /> : null}
 
       {pendingConfirmation?.assistantMessageId === message.id ? (
         <ConfirmationCard pending={pendingConfirmation} onConfirm={onConfirm} onCancel={onCancel} />
-      ) : null}
-
-      {message.artifacts.length > 0 && sessionId ? (
-        <div className="space-y-3">
-          {message.artifacts.map((artifact) => (
-            <ArtifactCard key={artifact.id} sessionId={sessionId} artifact={artifact} />
-          ))}
-        </div>
       ) : null}
 
       {message.finalAnswer ? (
@@ -131,23 +185,65 @@ function AssistantMessage({
           </div>
           <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-700">{message.finalAnswer}</p>
         </div>
-      ) : message.status === "streaming" ? (
-        <div className="rounded-lg border border-dashed border-slate-300 bg-white/70 p-4">
-          <div className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-            <Sparkles className="h-4 w-4 text-teal-700" />
-            The agent is working through the data...
-          </div>
-          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-200">
-            <div className="h-full w-1/2 animate-pulse rounded-full bg-teal-600" />
-          </div>
+      ) : null}
+
+      {message.artifacts.length > 0 && sessionId ? (
+        <div className="space-y-3">
+          {message.artifacts.map((artifact) => (
+            <ArtifactCard key={artifact.id} sessionId={sessionId} artifact={artifact} />
+          ))}
         </div>
       ) : null}
     </div>
   );
 }
 
-function TracePanel({ trace }: { trace: ChatTraceEvent[] }) {
+function ThinkingProgress({ progress }: { progress: AgentProgress }) {
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="rounded-lg border border-dashed border-slate-300 bg-white/70 p-4"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+            <Sparkles className="h-4 w-4 text-teal-700" />
+            Working through agent steps
+          </div>
+          <p className="mt-1 truncate text-xs font-medium text-muted-foreground">
+            {progress.label} • {progress.steps} step{progress.steps === 1 ? "" : "s"}
+          </p>
+        </div>
+        <span className="shrink-0 rounded-full bg-teal-50 px-2 py-1 text-[11px] font-bold uppercase tracking-wide text-teal-800">
+          Live
+        </span>
+      </div>
+      <div className="relative mt-3 h-2 overflow-hidden rounded-full bg-slate-200">
+        <motion.div
+          className="h-full rounded-full bg-teal-600"
+          initial={false}
+          animate={{ width: `${progress.value}%` }}
+          transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+        />
+        {progress.waiting ? (
+          <motion.div
+            className="absolute inset-y-0 w-1/3 rounded-full bg-white/35"
+            initial={{ x: "-120%" }}
+            animate={{ x: "320%" }}
+            transition={{ duration: 1.35, repeat: Infinity, ease: "easeInOut" }}
+          />
+        ) : null}
+      </div>
+    </motion.div>
+  );
+}
+
+function TracePanel({ trace, isStreaming }: { trace: ChatTraceEvent[]; isStreaming: boolean }) {
   const [open, setOpen] = useState(true);
+  const [hasNewTraceWhileCollapsed, setHasNewTraceWhileCollapsed] = useState(false);
+  const lastTraceIdRef = useRef<string | null>(null);
   const latest = trace[trace.length - 1];
 
   useEffect(() => {
@@ -155,18 +251,35 @@ function TracePanel({ trace }: { trace: ChatTraceEvent[] }) {
       return;
     }
 
-    setOpen(true);
-    const delay = latest.type === "code_started" ? 7600 : latest.type === "code_result_summary" ? 5600 : 4200;
-    const timer = window.setTimeout(() => setOpen(false), delay);
-    return () => window.clearTimeout(timer);
-  }, [latest?.id, latest?.type]);
+    const previousId = lastTraceIdRef.current;
+    lastTraceIdRef.current = latest.id;
+    if (previousId === null || previousId === latest.id) {
+      return;
+    }
+
+    if (isStreaming && !open) {
+      setOpen(true);
+      setHasNewTraceWhileCollapsed(true);
+      window.setTimeout(() => setHasNewTraceWhileCollapsed(false), 1800);
+    }
+  }, [isStreaming, latest?.id, open]);
+
+  const handleToggle = () => {
+    setOpen((value) => {
+      const next = !value;
+      if (next) {
+        setHasNewTraceWhileCollapsed(false);
+      }
+      return next;
+    });
+  };
 
   return (
     <motion.section layout className="overflow-hidden rounded-lg border border-border bg-white/72 shadow-sm">
       <button
         type="button"
         className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-        onClick={() => setOpen((value) => !value)}
+        onClick={handleToggle}
       >
         <span className="flex items-center gap-2 text-sm font-bold">
           <TerminalSquare className="h-4 w-4 text-indigo-700" />
@@ -174,6 +287,11 @@ function TracePanel({ trace }: { trace: ChatTraceEvent[] }) {
           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-600">
             {trace.length}
           </span>
+          {hasNewTraceWhileCollapsed ? (
+            <span className="rounded-full bg-teal-100 px-2 py-0.5 text-[11px] font-bold text-teal-800">
+              New trace update
+            </span>
+          ) : null}
         </span>
         <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
           <span className="truncate">{traceSummary(latest)}</span>
@@ -429,6 +547,107 @@ function traceSummary(item?: ChatTraceEvent) {
     return "Error";
   }
   return item.type;
+}
+
+type AgentProgress = {
+  value: number;
+  label: string;
+  steps: number;
+  waiting: boolean;
+};
+
+function agentProgress(message: ChatMessage): AgentProgress {
+  let value = 5;
+  let label = "Preparing...";
+  const steps = message.trace.length + message.artifacts.length + (message.finalAnswer ? 1 : 0);
+
+  message.trace.forEach((item) => {
+    if (item.type === "trace") {
+      value = Math.max(value, 12) + 4;
+      label = item.message || "Inspecting data...";
+      return;
+    }
+
+    if (item.type === "code_started") {
+      value = Math.max(value, 25) + 6;
+      label = "Running Python...";
+      return;
+    }
+
+    if (item.type === "code_result_summary") {
+      value += 10;
+      label = item.ok ? "Reviewing Python result..." : "Recovering from Python error...";
+      return;
+    }
+
+    if (item.type === "confirmation_required") {
+      value = Math.max(value, 70);
+      label = "Waiting for confirmation...";
+      return;
+    }
+
+    if (item.type === "error") {
+      value = 100;
+      label = "Handling an error...";
+    }
+  });
+
+  if (message.artifacts.length > 0) {
+    value += message.artifacts.length * 8;
+    label = "Creating artifact...";
+  }
+
+  if (message.finalAnswer) {
+    return {
+      value: 100,
+      label: "Finalizing answer...",
+      steps,
+      waiting: false,
+    };
+  }
+
+  if (message.status === "done" || message.status === "error" || message.status === "waiting_confirmation") {
+    value = 100;
+  }
+
+  const cappedValue = message.status === "streaming" ? Math.min(value, 92) : Math.min(value, 100);
+  return {
+    value: Math.max(5, cappedValue),
+    label,
+    steps,
+    waiting: message.status === "streaming",
+  };
+}
+
+function messageActivityKey(messages: ChatMessage[]) {
+  return messages
+    .map((message) =>
+      [
+        message.id,
+        message.status,
+        message.trace.length,
+        message.trace[message.trace.length - 1]?.id ?? "none",
+        message.artifacts.length,
+        message.finalAnswer ? "final" : "no-final",
+      ].join(":"),
+    )
+    .join("|");
+}
+
+function getScrollParent(element: HTMLElement | null): HTMLElement | null {
+  let current = element?.parentElement ?? null;
+  while (current) {
+    const style = window.getComputedStyle(current);
+    if (/(auto|scroll)/.test(style.overflowY) && current.scrollHeight > current.clientHeight) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return document.scrollingElement instanceof HTMLElement ? document.scrollingElement : null;
+}
+
+function isNearScrollBottom(element: HTMLElement) {
+  return element.scrollHeight - element.scrollTop - element.clientHeight < 160;
 }
 
 function compactResultSummary(item: ChatTraceEvent) {

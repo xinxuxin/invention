@@ -8,6 +8,14 @@ class ArtifactRead(BaseModel):
     id: str
     name: str
     kind: str
+    type: str | None = None
+    title: str | None = None
+    description: str | None = None
+    columns: list[dict[str, Any]] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    chart_spec: dict[str, Any] | None = None
+    download_url: str | None = None
+    source_message_id: str | None = None
     path: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
@@ -35,6 +43,7 @@ class ChartArtifactSpec(BaseModel):
     data: list[dict[str, Any]]
     x: str
     y: str
+    series: str | None = None
     color: str | None = None
     description: str | None = None
 

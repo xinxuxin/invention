@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -8,7 +9,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.core.config import get_settings
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode, new_id
-from app.runtime.python_executor import PythonExecutor
+from app.runtime.python_executor import PythonExecutor, object_to_record, objects_to_records, safe_attrs, to_dataframe
 from app.services.introspection import introspect_object
 from app.storage.files import load_pickle, save_snapshot
 
@@ -31,6 +32,32 @@ def db_session(tmp_path, monkeypatch):
     get_settings.cache_clear()
 
 
+class DummyMissingPatent:
+    def __init__(self, **fields: object) -> None:
+        self.attrs = {"__dict__": fields}
+
+    def __repr__(self) -> str:
+        return (
+            "<MissingPickleClass filing.patent_portfolio.api_classes."
+            f"GenericPatentMetadata attrs={self.attrs!r}>"
+        )
+
+
+class DummyPydanticWrapper:
+    def __init__(self) -> None:
+        self.__dict__ = {
+            "__dict__": {
+                "country": "CA",
+                "title": "CLEANING ROBOT",
+                "owners": ["Softbank"],
+                "filing_date": datetime(2019, 3, 6),
+            },
+            "__pydantic_extra__": None,
+            "__pydantic_fields_set__": {"country", "title"},
+            "__pydantic_private__": None,
+        }
+
+
 def test_executor_can_inspect_dataframe(db_session: Session) -> None:
     session_id, dataset_id = _create_dataset(db_session)
     executor = PythonExecutor(db_session)
@@ -45,8 +72,9 @@ def test_executor_can_inspect_dataframe(db_session: Session) -> None:
     assert "(3, 2)" in result.stdout
     assert result.traceback is None
     assert isinstance(result.result_preview, dict)
-    assert result.result_preview["object_type"] == "DataFrame"
+    assert result.result_preview["type"] == "dataframe"
     assert result.result_preview["shape"] == [2, 2]
+    assert result.result_preview["rows"] == [{"value": 1, "group": "a"}, {"value": 2, "group": "b"}]
 
 
 def test_read_only_execution_does_not_create_version(db_session: Session) -> None:
@@ -65,6 +93,58 @@ def test_read_only_execution_does_not_create_version(db_session: Session) -> Non
     assert result.stdout.strip() == "6"
     assert result.updated_datasets == []
     assert len(versions) == 1
+
+
+def test_final_expression_capture_returns_json_result(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "x = 1\n{'answer': x + 1}",
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.result_preview == {"answer": 2}
+
+
+def test_expression_capture_can_return_columns_and_rows(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "columns = ['a', 'b']",
+                "rows = [{'a': 1, 'b': 2}]",
+                "{'columns': columns, 'rows': rows}",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.result_preview == {"columns": ["a", "b"], "rows": [{"a": 1, "b": 2}]}
+
+
+def test_dataframe_final_expression_capture_uses_dataframe_preview(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "import pandas as pd\npd.DataFrame([{'a': 1}, {'a': 2}])",
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert isinstance(result.result_preview, dict)
+    assert result.result_preview["type"] == "dataframe"
+    assert result.result_preview["shape"] == [2, 1]
+    assert result.result_preview["columns"] == ["a"]
+    assert result.result_preview["rows"] == [{"a": 1}, {"a": 2}]
 
 
 def test_executor_allows_generic_object_introspection_builtins(db_session: Session) -> None:
@@ -91,6 +171,110 @@ def test_executor_allows_generic_object_introspection_builtins(db_session: Sessi
     assert result.ok is True
     assert result.stdout.splitlines() == ["True", "7", "False"]
     assert result.result_preview is not None
+
+
+def test_missing_pickle_class_like_helpers_extract_inner_attrs(db_session: Session) -> None:
+    class DummyMissing:
+        def __init__(self) -> None:
+            self.attrs = {"__dict__": {"country": "CA", "title": "CLEANING ROBOT"}}
+
+    session_id, dataset_id = _create_dataset(db_session, filename="patent.pkl", value=[DummyMissing()])
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "record = safe_attrs(data[0])",
+                "frame = to_dataframe(data)",
+                "RESULT = {'record': record, 'columns': list(frame.columns), 'rows': frame.to_dict('records')}",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.result_preview["record"] == {"country": "CA", "title": "CLEANING ROBOT"}
+    assert result.result_preview["columns"] == ["country", "title"]
+    assert result.result_preview["rows"] == [{"country": "CA", "title": "CLEANING ROBOT"}]
+
+
+def test_softbank_patent_helper_conversion_matches_missing_pickle_shape() -> None:
+    dataset = _softbank_patent_dataset()
+    first = dataset[0]
+    frame = to_dataframe(dataset)
+    expected_columns = [
+        "country",
+        "doc_number",
+        "kind",
+        "title",
+        "owners",
+        "inventors",
+        "assignees",
+        "filing_date",
+        "publication_date",
+        "status",
+        "family_size",
+        "forward_citation_count",
+    ]
+
+    assert safe_attrs(first)["country"] == "CA"
+    assert object_to_record(first)["title"] == "CLEANING ROBOT"
+    assert frame.columns.tolist() == expected_columns
+
+
+def test_pydantic_wrapper_object_to_record_flattens_domain_fields() -> None:
+    record = object_to_record(DummyPydanticWrapper())
+
+    assert record == {
+        "country": "CA",
+        "title": "CLEANING ROBOT",
+        "owners": ["Softbank"],
+        "filing_date": "2019-03-06T00:00:00",
+    }
+    assert "__dict__" not in record
+    assert "__pydantic_extra__" not in record
+    assert "__pydantic_fields_set__" not in record
+    assert "__pydantic_private__" not in record
+
+
+def test_pydantic_wrapper_to_dataframe_uses_domain_columns() -> None:
+    frame = to_dataframe([DummyPydanticWrapper()])
+    records = objects_to_records([DummyPydanticWrapper()])
+
+    assert frame.columns.tolist() == ["country", "title", "owners", "filing_date"]
+    assert "__dict__" not in frame.columns
+    assert records[0]["owners"] == ["Softbank"]
+    assert not isinstance(records[0]["owners"], str)
+
+
+def test_execute_python_calls_are_isolated(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    first = executor.execute(session_id, "x = 123", active_dataset_id=dataset_id)
+    second = executor.execute(session_id, "x", active_dataset_id=dataset_id)
+
+    assert first.ok is True
+    assert first.result_preview is None
+    assert second.ok is False
+    assert second.traceback is not None
+    assert "NameError" in second.traceback
+
+
+def test_dataset_profiles_namespace_is_available(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session, filename="profile-frame.pkl")
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "{'keys': list(dataset_profiles.keys()), 'active_type': active_dataset_profile['object_type']}",
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.result_preview["keys"] == ["profile_frame"]
+    assert result.result_preview["active_type"] == "DataFrame"
 
 
 def test_mutating_execution_creates_new_version(db_session: Session) -> None:
@@ -193,8 +377,160 @@ def test_result_preview_is_json_safe(db_session: Session) -> None:
 
     assert result.ok is True
     assert isinstance(result.result_preview, dict)
-    assert result.result_preview["object_type"] == "dict"
-    assert result.result_preview["sample_items"][0]["key"] == "scalar"
+    assert result.result_preview["scalar"] == 1
+    assert result.result_preview["stamp"] == "2026-05-18T00:00:00"
+
+
+def test_softbank_like_tabular_preview_succeeds_without_null_preview(db_session: Session) -> None:
+    class DummyMissing:
+        def __init__(self, country: str, title: str, owners: list[str], filing_date: pd.Timestamp) -> None:
+            self.attrs = {
+                "__dict__": {
+                    "country": country,
+                    "title": title,
+                    "owners": owners,
+                    "filing_date": filing_date,
+                }
+            }
+
+    value = [
+        DummyMissing("CA", "CLEANING ROBOT", ["Softbank"], pd.Timestamp("2019-03-06")),
+        DummyMissing("CN", "ROBOT CONTROL", ["Softbank", "Other"], pd.Timestamp("2020-05-22")),
+    ]
+    session_id, dataset_id = _create_dataset(db_session, filename="softbank-like.pkl", value=value)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "frame = to_dataframe(data)",
+                "RESULT = {'columns': list(frame.columns), 'rows': frame.head(5).to_dict('records')}",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.result_preview is not None
+    assert result.result_preview["columns"] == ["country", "title", "owners", "filing_date"]
+    assert result.result_preview["rows"][0]["country"] == "CA"
+    assert result.result_preview["rows"][0]["title"] == "CLEANING ROBOT"
+
+
+def test_softbank_like_schema_summary_uses_structured_helpers(db_session: Session) -> None:
+    class DummyMissing:
+        def __init__(self) -> None:
+            self.attrs = {
+                "__dict__": {
+                    "country": "CA",
+                    "title": "CLEANING ROBOT",
+                    "owners": ["Softbank"],
+                    "filing_date": pd.Timestamp("2019-03-06"),
+                    "family_size": 15,
+                }
+            }
+
+    session_id, dataset_id = _create_dataset(db_session, filename="softbank-schema.pkl", value=[DummyMissing()])
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "records = objects_to_records(data, limit=5)",
+                "scalar_fields = []",
+                "date_fields = []",
+                "list_like_fields = []",
+                "for key, value in records[0].items():",
+                "    if isinstance(value, list):",
+                "        list_like_fields.append(key)",
+                "    elif 'date' in key or hasattr(value, 'isoformat'):",
+                "        date_fields.append(key)",
+                "    else:",
+                "        scalar_fields.append(key)",
+                "{'scalar_fields': scalar_fields, 'date_fields': date_fields, 'list_like_fields': list_like_fields}",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.result_preview["scalar_fields"] == ["country", "title", "family_size"]
+    assert result.result_preview["date_fields"] == ["filing_date"]
+    assert result.result_preview["list_like_fields"] == ["owners"]
+
+
+def test_softbank_patent_final_expression_tabular_preview(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(
+        db_session,
+        filename="softbank-patents.pkl",
+        value=_softbank_patent_dataset(),
+    )
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "df = to_dataframe(data)",
+                "RESULT = {",
+                "    'columns': list(df.columns),",
+                "    'rows': df.head(5).to_dict(orient='records'),",
+                "}",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.result_preview is not None
+    assert result.result_preview["columns"][:4] == ["country", "doc_number", "kind", "title"]
+    assert "owners" in result.result_preview["columns"]
+    assert "status" in result.result_preview["columns"]
+    assert "__dict__" not in result.result_preview["columns"]
+    assert result.result_preview["rows"][0]["country"] == "CA"
+    assert result.result_preview["rows"][0]["title"] == "CLEANING ROBOT"
+    assert result.result_preview["rows"][0]["owners"] == ["Softbank", "SOFTBANK ROBOTICS GROUP CORP"]
+    assert result.result_preview["rows"][0]["filing_date"] == "2019-03-06T00:00:00"
+
+
+def test_softbank_patent_schema_classification_code(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(
+        db_session,
+        filename="softbank-patents.pkl",
+        value=_softbank_patent_dataset(),
+    )
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "df = to_dataframe(data)",
+                "sample = df.iloc[0].to_dict()",
+                "schema = {}",
+                "for k, v in sample.items():",
+                "    if isinstance(v, list):",
+                "        schema[k] = 'list-like'",
+                "    elif hasattr(v, 'isoformat'):",
+                "        schema[k] = 'date'",
+                "    elif isinstance(v, (str, int, float, bool)):",
+                "        schema[k] = 'scalar'",
+                "    else:",
+                "        schema[k] = type(v).__name__",
+                "RESULT = schema",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.result_preview["owners"] == "list-like"
+    assert result.result_preview["assignees"] == "list-like"
+    assert result.result_preview["filing_date"] == "date"
+    assert result.result_preview["country"] == "scalar"
+    assert result.result_preview["family_size"] == "scalar"
 
 
 def test_artifact_helpers_store_files_and_metadata(db_session: Session) -> None:
@@ -224,6 +560,79 @@ def test_artifact_helpers_store_files_and_metadata(db_session: Session) -> None:
         assert Path(artifact.path).exists()
         assert artifact.artifact_metadata
 
+    table_artifact = next(artifact for artifact in result.artifacts if artifact.kind == "table")
+    table_payload = json.loads(Path(table_artifact.path).read_text(encoding="utf-8"))
+    assert table_payload["type"] == "table"
+    assert table_payload["title"] == "values table"
+    assert table_payload["columns"] == [
+        {"key": "value", "label": "value", "type": "number"},
+        {"key": "group", "label": "group", "type": "text"},
+    ]
+    assert table_payload["rows"] == [{"value": 1, "group": "a"}, {"value": 2, "group": "b"}]
+    assert table_payload["preview_row_count"] == 2
+
+
+def test_save_table_accepts_objects_and_preserves_structured_cells(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(
+        db_session,
+        filename="patents.pkl",
+        value=[
+            DummyMissingPatent(
+                country="CA",
+                title="CLEANING ROBOT",
+                owners=["Softbank"],
+                filing_date=datetime(2019, 3, 6),
+            )
+        ],
+    )
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "save_table('patent preview', data, description='First patent rows')",
+        active_dataset_id=dataset_id,
+    )
+
+    artifact = next(item for item in result.artifacts if item.kind == "table")
+    payload = json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert artifact.title == "patent preview"
+    assert artifact.description == "First patent rows"
+    assert [column["key"] for column in payload["columns"]] == [
+        "country",
+        "title",
+        "owners",
+        "filing_date",
+    ]
+    assert payload["rows"][0]["owners"] == ["Softbank"]
+    assert payload["rows"][0]["filing_date"] == "2019-03-06T00:00:00"
+
+
+def test_result_preview_columns_rows_creates_inline_table_artifact(db_session: Session) -> None:
+    session_id, dataset_id = _create_dataset(db_session)
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "rows = [{'country': 'CA', 'count': 2}, {'country': 'CN', 'count': 1}]",
+                "RESULT = {'columns': ['country', 'count'], 'rows': rows}",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    artifact = next(item for item in result.artifacts if item.kind == "table")
+    payload = json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+
+    assert result.ok is True
+    assert result.result_preview["rows"][0]["country"] == "CA"
+    assert artifact.metadata["csv_download_available"] is True
+    assert [column["key"] for column in payload["columns"]] == ["country", "count"]
+    assert payload["rows"] == [{"country": "CA", "count": 2}, {"country": "CN", "count": 1}]
+
 
 def test_chart_artifact_validates_and_reduces_large_data(db_session: Session) -> None:
     session_id, dataset_id = _create_dataset(db_session)
@@ -245,7 +654,7 @@ def test_chart_artifact_validates_and_reduces_large_data(db_session: Session) ->
 
     assert result.ok is True
     assert artifact.metadata["chart_type"] == "bar"
-    assert artifact.metadata["rows"] == 50
+    assert artifact.metadata["row_count"] == 50
     assert artifact.metadata["sampled"] is True
     assert payload["chart_type"] == "bar"
     assert len(payload["data"]) == 50
@@ -338,6 +747,39 @@ def _create_dataset(
     db_session.commit()
 
     return analysis_session.id, dataset_id
+
+
+def _softbank_patent_dataset() -> list[DummyMissingPatent]:
+    return [
+        DummyMissingPatent(
+            country="CA",
+            doc_number="186426",
+            kind="S",
+            title="CLEANING ROBOT",
+            owners=["Softbank", "SOFTBANK ROBOTICS GROUP CORP"],
+            inventors=[],
+            assignees=["SOFTBANK ROBOTICS GROUP"],
+            filing_date=datetime(2019, 3, 6),
+            publication_date=datetime(2020, 5, 22),
+            status="Filed",
+            family_size=3,
+            forward_citation_count=0,
+        ),
+        DummyMissingPatent(
+            country="CN",
+            doc_number="109842558",
+            kind="A",
+            title="Message forwarding method",
+            owners=["Softbank", "Huawei"],
+            inventors=["SHEN ZHIMIN"],
+            assignees=["HUAWEI TECH"],
+            filing_date=datetime(2017, 11, 28),
+            publication_date=datetime(2019, 6, 7),
+            status="Granted",
+            family_size=5,
+            forward_citation_count=2,
+        ),
+    ]
 
 
 def _create_two_datasets(db_session: Session) -> tuple[str, str, str]:

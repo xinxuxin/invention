@@ -1,5 +1,6 @@
 import json
 from collections.abc import Generator
+from datetime import datetime
 from pathlib import Path
 
 import cloudpickle
@@ -14,6 +15,17 @@ from app.core.config import get_settings
 from app.db.session import get_session
 from app.main import app
 from app.models.entities import new_id
+
+
+class DummyMissingPatent:
+    def __init__(self, **fields: object) -> None:
+        self.attrs = {"__dict__": fields}
+
+    def __repr__(self) -> str:
+        return (
+            "<MissingPickleClass filing.patent_portfolio.api_classes."
+            f"GenericPatentMetadata attrs={self.attrs!r}>"
+        )
 
 
 class ScriptedModelClient:
@@ -84,7 +96,8 @@ def test_streams_trace_python_result_and_final_answer(client: TestClient) -> Non
     assert any(event["type"] == "code_started" for event in events)
     assert any(event["type"] == "code_result_summary" and event["ok"] for event in events)
     assert events[-2]["type"] == "final_answer"
-    assert events[-2]["answer"].startswith("The file contains")
+    assert "Result preview" in events[-2]["answer"]
+    assert fake.calls == 1
     assert events[-1]["type"] == "message_done"
 
 
@@ -148,7 +161,7 @@ def test_agent_summarizes_latest_execution_after_step_limit(client: TestClient) 
 
     response = client.post(
         f"/api/sessions/{session_id}/chat/stream",
-        json={"message": "Keep inspecting until the step limit", "active_dataset_id": dataset_id},
+        json={"message": "Run repeated execution without final answer", "active_dataset_id": dataset_id},
     )
     events = _parse_sse(response.text)
 
@@ -461,6 +474,186 @@ def test_agent_context_and_executor_include_multiple_datasets(client: TestClient
     assert "customers_2026" in first_input
 
 
+def test_agent_softbank_like_prompt_gets_non_null_preview_without_retry(client: TestClient) -> None:
+    class DummyMissing:
+        def __init__(self, country: str, title: str) -> None:
+            self.attrs = {
+                "__dict__": {
+                    "country": country,
+                    "title": title,
+                    "owners": ["Softbank"],
+                    "filing_date": pd.Timestamp("2019-03-06"),
+                }
+            }
+
+    session_response = client.post("/api/sessions", json={"name": "SoftBank-like agent test"})
+    session_id = session_response.json()["id"]
+    dataset_id = _upload_pickle(
+        client,
+        session_id,
+        "softbank-like.pkl",
+        [DummyMissing("CA", "CLEANING ROBOT"), DummyMissing("CN", "ROBOT CONTROL")],
+    )
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "frame = to_dataframe(data)",
+                            "{'columns': list(frame.columns), 'rows': frame.head(5).to_dict('records')}",
+                        ]
+                    )
+                },
+            ),
+            _tool_response("final_answer", {"answer": "Converted the custom objects into a table preview."}),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={
+            "message": "Convert this dataset into a tabular preview if possible. Show columns and 5 rows.",
+            "active_dataset_id": dataset_id,
+        },
+    )
+    events = _parse_sse(response.text)
+    result_events = [event for event in events if event["type"] == "code_result_summary"]
+
+    assert response.status_code == 200
+    assert len(result_events) == 1
+    assert result_events[0]["ok"] is True
+    assert result_events[0]["result_preview"]["columns"] == ["country", "title", "owners", "filing_date"]
+    assert result_events[0]["result_preview"]["rows"][0]["title"] == "CLEANING ROBOT"
+    assert events[-2]["type"] == "final_answer"
+
+
+def test_agent_softbank_patent_exported_chat_failure_regression(client: TestClient) -> None:
+    session_response = client.post("/api/sessions", json={"name": "SoftBank patent regression"})
+    session_id = session_response.json()["id"]
+    dataset_id = _upload_pickle(client, session_id, "softbank-patents.pkl", _softbank_patent_dataset())
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "df = to_dataframe(data)",
+                            "RESULT = {",
+                            "    'columns': list(df.columns),",
+                            "    'rows': df.head(5).to_dict(orient='records'),",
+                            "}",
+                        ]
+                    )
+                },
+            ),
+            _tool_response("final_answer", {"answer": "Inferred columns and rows from patent metadata."}),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={
+            "message": "Convert this dataset into a tabular preview if possible. Show inferred columns and first 5 rows.",
+            "active_dataset_id": dataset_id,
+        },
+    )
+    events = _parse_sse(response.text)
+    result_events = [event for event in events if event["type"] == "code_result_summary"]
+
+    assert response.status_code == 200
+    assert len(result_events) == 1
+    assert result_events[0]["ok"] is True
+    assert result_events[0]["result_preview"] is not None
+    assert result_events[0]["result_preview"]["columns"][:4] == ["country", "doc_number", "kind", "title"]
+    assert result_events[0]["result_preview"]["rows"][0]["title"] == "CLEANING ROBOT"
+    table_artifact = next(event["artifact"] for event in events if event["type"] == "artifact_created")
+    table_payload = client.get(f"/api/sessions/{session_id}/artifacts/{table_artifact['id']}/content").json()
+    assert table_artifact["kind"] == "table"
+    assert [column["key"] for column in table_payload["columns"][:4]] == [
+        "country",
+        "doc_number",
+        "kind",
+        "title",
+    ]
+    assert table_payload["rows"][0]["title"] == "CLEANING ROBOT"
+    assert not any(event["type"] == "error" and "step budget" in event.get("message", "") for event in events)
+    assert events[-2]["type"] == "final_answer"
+
+
+def test_table_prompt_streams_inline_artifact_from_result_preview(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "\n".join(
+                        [
+                            "rows = data.head(5).to_dict(orient='records')",
+                            "RESULT = {'columns': list(data.columns), 'rows': rows}",
+                        ]
+                    )
+                },
+            )
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Show the inferred columns and the first 5 rows", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    artifact_events = [event for event in events if event["type"] == "artifact_created"]
+
+    assert response.status_code == 200
+    assert len(artifact_events) == 1
+    assert artifact_events[0]["artifact"]["kind"] == "table"
+    assert events[-2]["type"] == "final_answer"
+    assert "shown in the chat" in events[-2]["answer"]
+
+
+def test_agent_stops_after_useful_inspection_result(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": (
+                        "{'object_type': type(data).__name__, "
+                        "'object_length': len(data), "
+                        "'sample_examples': data.head(2).to_dict('records')}"
+                    )
+                },
+            ),
+            _tool_response("execute_python", {"code": "raise RuntimeError('should not run')"}),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "What is in this file?", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    assert response.status_code == 200
+    assert fake.calls == 1
+    assert any(
+        event["type"] == "trace" and "Found enough information" in event.get("message", "")
+        for event in events
+    )
+    assert events[-2]["type"] == "final_answer"
+    assert "sample_examples" in events[-2]["answer"]
+    assert not any(event["type"] == "error" for event in events)
+
+
 def _tool_response(name: str, arguments: dict) -> AgentModelResponse:
     call_id = f"call-{name}-{new_id()}"
     return AgentModelResponse(
@@ -486,18 +679,55 @@ def _create_dataset(client: TestClient) -> tuple[str, str]:
 
 
 def _upload_frame(client: TestClient, session_id: str, filename: str, frame: pd.DataFrame) -> str:
+    return _upload_pickle(client, session_id, filename, frame)
+
+
+def _upload_pickle(client: TestClient, session_id: str, filename: str, value: object) -> str:
     upload_response = client.post(
         f"/api/sessions/{session_id}/datasets",
         files={
             "files": (
                 filename,
-                cloudpickle.dumps(frame),
+                cloudpickle.dumps(value),
                 "application/octet-stream",
             )
         },
     )
     assert upload_response.status_code == 201
     return upload_response.json()["datasets"][0]["id"]
+
+
+def _softbank_patent_dataset() -> list[DummyMissingPatent]:
+    return [
+        DummyMissingPatent(
+            country="CA",
+            doc_number="186426",
+            kind="S",
+            title="CLEANING ROBOT",
+            owners=["Softbank", "SOFTBANK ROBOTICS GROUP CORP"],
+            inventors=[],
+            assignees=["SOFTBANK ROBOTICS GROUP"],
+            filing_date=datetime(2019, 3, 6),
+            publication_date=datetime(2020, 5, 22),
+            status="Filed",
+            family_size=3,
+            forward_citation_count=0,
+        ),
+        DummyMissingPatent(
+            country="CN",
+            doc_number="109842558",
+            kind="A",
+            title="Message forwarding method",
+            owners=["Softbank", "Huawei"],
+            inventors=["SHEN ZHIMIN"],
+            assignees=["HUAWEI TECH"],
+            filing_date=datetime(2017, 11, 28),
+            publication_date=datetime(2019, 6, 7),
+            status="Granted",
+            family_size=5,
+            forward_citation_count=2,
+        ),
+    ]
 
 
 def _parse_sse(payload: str) -> list[dict]:

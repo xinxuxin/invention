@@ -395,6 +395,19 @@ class CodingAgent:
                             yield {"type": "message_done"}
                             return
 
+                        if _should_finalize_after_execution(request.message, result):
+                            yield {
+                                "type": "trace",
+                                "message": "Found enough information; preparing final answer...",
+                            }
+                            yield {
+                                "type": "final_answer",
+                                "answer": _answer_from_useful_execution(result),
+                                "state_changed": state_changed,
+                            }
+                            yield {"type": "message_done"}
+                            return
+
                         input_items.append(
                             {
                                 "type": "function_call_output",
@@ -990,7 +1003,60 @@ def _fallback_answer_from_execution(
         parts.append(f"Latest preview:\n{_truncate_for_answer(_json_preview(result.result_preview))}")
     if result.artifacts:
         parts.append(
-            f"Created {len(result.artifacts)} artifact{'s' if len(result.artifacts) != 1 else ''}."
+            f"Created {len(result.artifacts)} artifact{'s' if len(result.artifacts) != 1 else ''}; "
+            "the structured output is shown in the chat."
+        )
+    if result.updated_datasets:
+        parts.append(
+            f"Saved {len(result.updated_datasets)} dataset version"
+            f"{'s' if len(result.updated_datasets) != 1 else ''}."
+        )
+    else:
+        parts.append("No dataset mutation was saved.")
+    return "\n\n".join(parts)
+
+
+def _should_finalize_after_execution(user_message: str, result: ExecutionResult) -> bool:
+    if not result.ok:
+        return False
+    if result.artifacts:
+        return True
+    if not _execution_has_user_value(result):
+        return False
+    return _is_inspection_like_request(user_message)
+
+
+def _is_inspection_like_request(message: str) -> bool:
+    lowered = message.lower()
+    markers = [
+        "what is in",
+        "what's in",
+        "what is this",
+        "summarize",
+        "summary",
+        "schema",
+        "preview",
+        "sample",
+        "inspect",
+        "describe",
+        "columns",
+        "fields",
+        "tabular",
+        "convert this dataset",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def _answer_from_useful_execution(result: ExecutionResult) -> str:
+    parts = ["I inspected the data and found enough information to answer."]
+    if result.result_preview is not None:
+        parts.append(f"Result preview:\n{_truncate_for_answer(_json_preview(result.result_preview), limit=2200)}")
+    elif result.stdout:
+        parts.append(f"Output:\n{_truncate_for_answer(result.stdout, limit=1800)}")
+    if result.artifacts:
+        parts.append(
+            f"Created {len(result.artifacts)} artifact{'s' if len(result.artifacts) != 1 else ''}; "
+            "the structured output is shown in the chat."
         )
     if result.updated_datasets:
         parts.append(

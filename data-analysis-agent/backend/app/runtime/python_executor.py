@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import io
@@ -11,6 +12,7 @@ import statistics
 import traceback as traceback_module
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from queue import Empty
 from typing import Any
@@ -33,12 +35,34 @@ DEFAULT_MAX_STDOUT = 20_000
 DEFAULT_MAX_PREVIEW = 12_000
 MAX_CHART_ROWS = 500
 MAX_CATEGORY_CHART_ROWS = 50
+MAX_TABLE_INLINE_ROWS = 50
+MAX_TABLE_COLUMNS = 30
+MAX_TABLE_STORED_ROWS = 5_000
+MAX_TABLE_CELL_LENGTH = 200
+MAX_PREVIEW_ROWS = 20
+MAX_PREVIEW_ITEMS = 50
+MAX_PREVIEW_STRING_LENGTH = 1000
+MAX_PREVIEW_DEPTH = 4
+WRAPPER_KEYS = {
+    "__dict__",
+    "__pydantic_extra__",
+    "__pydantic_fields_set__",
+    "__pydantic_private__",
+}
 
 
 class ExecutionArtifact(BaseModel):
     id: str
     name: str
     kind: str
+    type: str | None = None
+    title: str | None = None
+    description: str | None = None
+    columns: list[dict[str, Any]] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    chart_spec: dict[str, Any] | None = None
+    download_url: str | None = None
+    source_message_id: str | None = None
     path: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
@@ -125,9 +149,15 @@ class PythonExecutor:
                 result_preview=result_preview,
             )
 
+        artifact_payloads = list(child_payload.get("artifacts", []))
+        auto_table_payload = _auto_table_artifact_from_preview(result_preview, artifact_payloads)
+        if auto_table_payload is not None:
+            artifact_payloads.append(auto_table_payload)
+
         artifacts = self._persist_artifacts(
             session_id=session_id,
-            artifact_payloads=child_payload.get("artifacts", []),
+            artifact_payloads=artifact_payloads,
+            source_message_id=created_by_message_id,
         )
         updated_datasets: list[UpdatedDataset] = []
         if mutates_state:
@@ -215,7 +245,9 @@ class PythonExecutor:
         context = _mp_context()
         queue: mp.Queue[bytes] = context.Queue()
         datasets = {dataset.key: dataset.value for dataset in loaded}
+        dataset_profiles = {dataset.key: _json_safe(dataset.row.profile) for dataset in loaded}
         active_key = active.key if active else None
+        active_dataset_profile = dataset_profiles.get(active_key) if active_key else None
 
         process = context.Process(
             target=_child_execute,
@@ -223,6 +255,8 @@ class PythonExecutor:
                 queue,
                 code,
                 datasets,
+                dataset_profiles,
+                active_dataset_profile,
                 active_key,
                 self.max_stdout_length,
                 self.max_preview_length,
@@ -337,6 +371,7 @@ class PythonExecutor:
         self,
         session_id: str,
         artifact_payloads: Sequence[Mapping[str, Any]],
+        source_message_id: str | None = None,
     ) -> list[ExecutionArtifact]:
         persisted: list[ExecutionArtifact] = []
         for payload in artifact_payloads:
@@ -344,24 +379,20 @@ class PythonExecutor:
             kind = str(payload.get("kind") or "artifact")
             content = payload.get("content", "")
             metadata = _json_safe(payload.get("metadata", {}))
+            if isinstance(metadata, dict):
+                metadata.setdefault("type", kind)
+                metadata.setdefault("title", name)
+                if source_message_id:
+                    metadata.setdefault("source_message_id", source_message_id)
             artifact = persist_artifact(
                 self.db,
                 name=name,
                 kind=kind,
                 session_id=session_id,
-                content=content if isinstance(content, bytes) else str(content),
+                content=_artifact_content_for_storage(content),
                 metadata=metadata if isinstance(metadata, dict) else {"metadata": metadata},
             )
-            persisted.append(
-                ExecutionArtifact(
-                    id=artifact.id,
-                    name=artifact.name,
-                    kind=artifact.kind,
-                    path=artifact.path,
-                    metadata=artifact.artifact_metadata,
-                    created_at=artifact.created_at.isoformat(),
-                )
-            )
+            persisted.append(_execution_artifact_read(artifact, session_id))
 
         return persisted
 
@@ -370,6 +401,8 @@ def _child_execute(
     queue: mp.Queue[bytes],
     code: str,
     datasets: dict[str, Any],
+    dataset_profiles: dict[str, Any],
+    active_dataset_profile: dict[str, Any] | None,
     active_key: str | None,
     max_stdout_length: int,
     max_preview_length: int,
@@ -379,10 +412,12 @@ def _child_execute(
     stderr = io.StringIO()
     artifacts: list[dict[str, Any]] = []
     preview_value: Any = None
+    preview_called = False
     data = datasets.get(active_key) if active_key else None
 
     def preview(obj: Any) -> Any:
-        nonlocal preview_value
+        nonlocal preview_called, preview_value
+        preview_called = True
         preview_value = obj
         return obj
 
@@ -390,6 +425,8 @@ def _child_execute(
     namespace: dict[str, Any] = {
         "__builtins__": _safe_builtins(),
         "datasets": datasets,
+        "dataset_profiles": dataset_profiles,
+        "active_dataset_profile": active_dataset_profile,
         "data": data,
         "pd": pd,
         "np": np,
@@ -400,23 +437,26 @@ def _child_execute(
         "save_chart": helpers["save_chart"],
         "save_csv": helpers["save_csv"],
         "preview": preview,
+        "safe_attrs": safe_attrs,
+        "object_to_record": object_to_record,
+        "objects_to_records": objects_to_records,
+        "to_dataframe": to_dataframe,
     }
 
     _block_network()
     try:
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            exec(compile(code, "<agent_code>", "exec"), namespace)
+            exec(_compile_agent_code(code), namespace)
 
         data = namespace.get("data")
-        if preview_value is None and "_result" in namespace:
-            preview_value = namespace["_result"]
+        result_value = _execution_result_value(namespace, preview_value, preview_called)
 
         payload = {
             "ok": True,
             "stdout": _truncate_text(stdout.getvalue(), max_stdout_length),
             "stderr": _truncate_text(stderr.getvalue(), max_stdout_length),
             "traceback": None,
-            "result_preview": _limit_preview(_preview(preview_value), max_preview_length),
+            "result_preview": _limit_preview(_preview(result_value), max_preview_length),
             "datasets": namespace["datasets"] if return_state else {},
             "data": data if return_state else None,
             "artifacts": artifacts,
@@ -436,36 +476,54 @@ def _child_execute(
     queue.put(cloudpickle.dumps(payload))
 
 
-def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
-    def save_table(name: str, dataframe_or_records: Any) -> dict[str, str]:
-        records = _records_from_table(dataframe_or_records)
-        content = json.dumps(records, ensure_ascii=False, indent=2)
-        artifacts.append(
-            {
-                "kind": "table",
-                "name": name,
-                "content": content,
-                "metadata": {
-                    "rows": len(records),
-                    "columns": list(records[0].keys()) if records else [],
-                },
-            }
+def _compile_agent_code(code: str) -> Any:
+    module = ast.parse(code, filename="<agent_code>", mode="exec")
+    if module.body and isinstance(module.body[-1], ast.Expr):
+        final_expression = module.body[-1]
+        assignment = ast.Assign(
+            targets=[ast.Name(id="_agent_result", ctx=ast.Store())],
+            value=final_expression.value,
         )
+        ast.copy_location(assignment, final_expression)
+        module.body[-1] = assignment
+        ast.fix_missing_locations(module)
+    return compile(module, "<agent_code>", "exec")
+
+
+def _execution_result_value(namespace: Mapping[str, Any], preview_value: Any, preview_called: bool) -> Any:
+    if "RESULT" in namespace:
+        return namespace["RESULT"]
+    if "_agent_result" in namespace:
+        return namespace["_agent_result"]
+    if "_result" in namespace:
+        return namespace["_result"]
+    if preview_called:
+        return preview_value
+    return None
+
+
+def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+    def save_table(name: str, dataframe_or_records: Any, description: str | None = None) -> dict[str, str]:
+        artifacts.append(_table_artifact_payload(name, dataframe_or_records, description=description))
         return {"kind": "table", "name": name}
 
-    def save_chart(name: str, chart_spec: Any) -> dict[str, str]:
-        safe_spec = _validated_chart_spec(name, chart_spec)
+    def save_chart(name: str, chart_spec: Any, description: str | None = None) -> dict[str, str]:
+        safe_spec = _validated_chart_spec(name, chart_spec, description=description)
         artifacts.append(
             {
                 "kind": "chart",
                 "name": name,
-                "content": json.dumps(safe_spec, ensure_ascii=False, indent=2),
+                "content": safe_spec,
                 "metadata": {
+                    "type": "chart",
+                    "title": safe_spec["title"],
+                    "description": safe_spec.get("description"),
                     "chart_type": safe_spec["chart_type"],
-                    "rows": len(safe_spec["data"]),
+                    "row_count": len(safe_spec["data"]),
                     "x": safe_spec["x"],
                     "y": safe_spec["y"],
                     "sampled": bool(safe_spec.get("_sampling")),
+                    "chart_spec": {key: value for key, value in safe_spec.items() if key != "data"},
                 },
             }
         )
@@ -479,7 +537,10 @@ def _artifact_helpers(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
                 "name": name,
                 "content": frame.to_csv(index=False),
                 "metadata": {
+                    "type": "csv",
+                    "title": name,
                     "rows": int(len(frame)),
+                    "row_count": int(len(frame)),
                     "columns": [str(column) for column in frame.columns.tolist()],
                 },
             }
@@ -565,42 +626,477 @@ def _block_network() -> None:
     socket.create_connection = blocked  # type: ignore[assignment]
 
 
+def safe_attrs(obj: Any) -> dict[str, Any]:
+    attrs = getattr(obj, "attrs", None)
+    if isinstance(attrs, Mapping) and isinstance(attrs.get("__dict__"), Mapping):
+        return dict(attrs["__dict__"])
+
+    object_dict = getattr(obj, "__dict__", None)
+    if isinstance(object_dict, Mapping):
+        nested_attrs = object_dict.get("attrs")
+        if isinstance(nested_attrs, Mapping) and isinstance(nested_attrs.get("__dict__"), Mapping):
+            return dict(nested_attrs["__dict__"])
+        if isinstance(object_dict.get("__dict__"), Mapping):
+            return dict(object_dict["__dict__"])
+
+    dumped = _pydantic_dump(obj)
+    if dumped is not None:
+        return _unwrap_record_mapping(dumped)
+
+    if isinstance(obj, Mapping):
+        return _unwrap_record_mapping(obj)
+
+    if isinstance(object_dict, Mapping):
+        return _unwrap_record_mapping(object_dict)
+
+    return {"repr": _safe_repr(obj)}
+
+
+def object_to_record(obj: Any) -> dict[str, Any]:
+    record = _domain_record(safe_attrs(obj))
+    return _record_safe(record, iso_dates=True)
+
+
+def objects_to_records(items: Any, limit: int | None = None) -> list[dict[str, Any]]:
+    return _objects_to_records(items, limit=limit, iso_dates=True)
+
+
+def _objects_to_records(items: Any, limit: int | None = None, *, iso_dates: bool) -> list[dict[str, Any]]:
+    max_items = MAX_PREVIEW_ROWS if limit is None else max(0, limit)
+    if isinstance(items, Mapping) or isinstance(items, (str, bytes, bytearray)):
+        return [_record_safe(_domain_record(safe_attrs(items)), iso_dates=iso_dates)]
+
+    try:
+        iterator = iter(items)
+    except TypeError:
+        return [_record_safe(_domain_record(safe_attrs(items)), iso_dates=iso_dates)]
+
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(iterator):
+        if index >= max_items:
+            break
+        records.append(_record_safe(_domain_record(safe_attrs(item)), iso_dates=iso_dates))
+    return records
+
+
+def to_dataframe(obj: Any, limit: int | None = None) -> pd.DataFrame:
+    if isinstance(obj, pd.DataFrame):
+        return obj
+
+    if isinstance(obj, pd.Series):
+        return obj.to_frame()
+
+    if isinstance(obj, np.ndarray):
+        array = obj[:limit] if limit is not None and obj.ndim > 0 else obj
+        return pd.DataFrame(array)
+
+    if isinstance(obj, Mapping):
+        record = _record_safe(_domain_record(safe_attrs(obj)), iso_dates=False)
+        if isinstance(record, Mapping) and _looks_like_column_dict(record):
+            return pd.DataFrame({str(key): list(value) for key, value in record.items()})
+        return pd.DataFrame([record])
+
+    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+        return pd.DataFrame(_objects_to_records(obj, limit=limit, iso_dates=False))
+
+    try:
+        return pd.DataFrame(_objects_to_records(obj, limit=limit, iso_dates=False))
+    except Exception:
+        return pd.DataFrame([{"repr": _safe_repr(obj)}])
+
+
+def _pydantic_dump(obj: Any) -> dict[str, Any] | None:
+    model_dump = getattr(obj, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
+        except Exception:
+            pass
+
+    dict_method = getattr(obj, "dict", None)
+    if callable(dict_method):
+        try:
+            dumped = dict_method()
+            if isinstance(dumped, Mapping):
+                return dict(dumped)
+        except Exception:
+            pass
+
+    return None
+
+
+def _unwrap_record_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    raw = dict(value)
+    inner = raw.get("__dict__")
+    if isinstance(inner, Mapping) and (_has_wrapper_keys(raw) or len(raw) == 1):
+        return dict(inner)
+    return raw
+
+
+def _domain_record(value: Mapping[str, Any]) -> dict[str, Any]:
+    unwrapped = _unwrap_record_mapping(value)
+    if set(unwrapped.keys()) == {"__dict__"} and isinstance(unwrapped.get("__dict__"), Mapping):
+        unwrapped = dict(unwrapped["__dict__"])
+
+    non_wrapper = {key: item for key, item in unwrapped.items() if key not in WRAPPER_KEYS}
+    if non_wrapper:
+        return non_wrapper
+    return dict(unwrapped)
+
+
+def _has_wrapper_keys(value: Mapping[str, Any]) -> bool:
+    return any(key in value for key in WRAPPER_KEYS)
+
+
 def _records_from_table(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, pd.DataFrame):
-        return _json_safe(value.to_dict(orient="records"))
+        return [_normalize_table_record(row) for row in value.to_dict(orient="records")]
 
     if isinstance(value, Mapping):
-        return [_json_safe(dict(value))]
+        frame = to_dataframe(value)
+        return [_normalize_table_record(row) for row in frame.to_dict(orient="records")]
 
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_json_safe(item) if isinstance(item, Mapping) else {"value": _json_safe(item)} for item in value]
+        return objects_to_records(value, limit=None)
 
-    return [{"value": _json_safe(value)}]
+    return [object_to_record(value)]
 
 
 def _frame_from_records(value: Any) -> pd.DataFrame:
+    return to_dataframe(value)
+
+
+def _table_artifact_payload(
+    name: str,
+    data: Any,
+    *,
+    description: str | None = None,
+    row_count_override: int | None = None,
+    columns_override: Sequence[Any] | None = None,
+) -> dict[str, Any]:
+    document = _table_document(
+        name,
+        data,
+        description=description,
+        row_count_override=row_count_override,
+        columns_override=columns_override,
+    )
+    return {
+        "kind": "table",
+        "name": name,
+        "content": document,
+        "metadata": {
+            "type": "table",
+            "title": document["title"],
+            "description": document.get("description"),
+            "columns": document["columns"],
+            "row_count": document["row_count"],
+            "preview_row_count": document["preview_row_count"],
+            "stored_row_count": document["stored_row_count"],
+            "stored_column_count": document["stored_column_count"],
+            "csv_download_available": True,
+        },
+    }
+
+
+def _table_document(
+    name: str,
+    data: Any,
+    *,
+    description: str | None,
+    row_count_override: int | None = None,
+    columns_override: Sequence[Any] | None = None,
+) -> dict[str, Any]:
+    frame = _frame_for_table(data)
+    frame = frame.copy()
+    frame.columns = _unique_column_names(frame.columns)
+
+    if columns_override is not None:
+        ordered_columns = [str(column) for column in columns_override][:MAX_TABLE_COLUMNS]
+        for column in ordered_columns:
+            if column not in frame.columns:
+                frame[column] = None
+        frame = frame[ordered_columns]
+    else:
+        frame = frame.iloc[:, :MAX_TABLE_COLUMNS]
+
+    row_count = row_count_override if row_count_override is not None else int(len(frame))
+    stored_frame = frame.head(MAX_TABLE_STORED_ROWS)
+    rows = [_normalize_table_record(row) for row in stored_frame.to_dict(orient="records")]
+    columns = _table_columns(frame, rows)
+    preview_rows = rows[:MAX_TABLE_INLINE_ROWS]
+
+    return {
+        "type": "table",
+        "title": str(name),
+        "description": description,
+        "columns": columns,
+        "rows": rows,
+        "preview_rows": preview_rows,
+        "row_count": int(row_count),
+        "preview_row_count": len(preview_rows),
+        "stored_row_count": len(rows),
+        "stored_column_count": len(columns),
+        "truncated": bool(row_count > len(rows) or len(frame.columns) > len(columns)),
+    }
+
+
+def _frame_for_table(value: Any) -> pd.DataFrame:
     if isinstance(value, pd.DataFrame):
         return value
-
     if isinstance(value, pd.Series):
-        return value.to_frame()
+        name = value.name if value.name is not None else "value"
+        return value.to_frame(name=str(name))
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return pd.DataFrame(_objects_to_records(value, limit=MAX_TABLE_STORED_ROWS, iso_dates=False))
+    return to_dataframe(value)
 
+
+def _unique_column_names(columns: Sequence[Any]) -> list[str]:
+    used: dict[str, int] = {}
+    names: list[str] = []
+    for column in columns:
+        base = str(column)
+        count = used.get(base, 0)
+        used[base] = count + 1
+        names.append(base if count == 0 else f"{base}_{count + 1}")
+    return names
+
+
+def _table_columns(frame: pd.DataFrame, rows: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    columns: list[dict[str, str]] = []
+    for column in list(frame.columns)[:MAX_TABLE_COLUMNS]:
+        columns.append(
+            {
+                "key": str(column),
+                "label": str(column),
+                "type": _infer_table_column_type(str(column), rows),
+            }
+        )
+    return columns
+
+
+def _infer_table_column_type(column: str, rows: Sequence[Mapping[str, Any]]) -> str:
+    for row in rows[:MAX_TABLE_INLINE_ROWS]:
+        value = row.get(column)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return "number"
+        if isinstance(value, list):
+            return "list"
+        if isinstance(value, Mapping):
+            return "object"
+        if isinstance(value, str):
+            try:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return "text"
+            return "date"
+    return "unknown"
+
+
+def _normalize_table_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): _table_cell_safe(value) for key, value in record.items()}
+
+
+def _table_cell_safe(value: Any, *, depth: int = 0) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, float) and (np.isnan(value) or np.isinf(value)):
+        return None
+    if isinstance(value, np.generic):
+        return _table_cell_safe(value.item(), depth=depth + 1)
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return value.isoformat()
+    if isinstance(value, str):
+        return _truncate_preview_string(value, MAX_TABLE_CELL_LENGTH)
+    if isinstance(value, (int, bool)):
+        return value
     if isinstance(value, Mapping):
-        return pd.DataFrame([value])
+        if depth >= MAX_PREVIEW_DEPTH:
+            return _safe_repr(value, MAX_TABLE_CELL_LENGTH)
+        return {
+            str(key): _table_cell_safe(item_value, depth=depth + 1)
+            for key, item_value in list(value.items())[:MAX_PREVIEW_ITEMS]
+        }
+    if isinstance(value, (list, tuple, set)):
+        if depth >= MAX_PREVIEW_DEPTH:
+            return _safe_repr(value, MAX_TABLE_CELL_LENGTH)
+        return [_table_cell_safe(item, depth=depth + 1) for item in list(value)[:MAX_PREVIEW_ITEMS]]
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
 
-    return pd.DataFrame(value)
+    attrs = safe_attrs(value)
+    if attrs.keys() != {"repr"}:
+        return _table_cell_safe(_domain_record(attrs), depth=depth + 1)
+    return _safe_repr(value, MAX_TABLE_CELL_LENGTH)
 
 
-def _validated_chart_spec(name: str, chart_spec: Any) -> dict[str, Any]:
-    raw = _json_safe(chart_spec)
+def _looks_like_column_dict(value: Mapping[str, Any]) -> bool:
+    if not value:
+        return False
+    lengths: set[int] = set()
+    for item in value.values():
+        if isinstance(item, np.ndarray):
+            if item.ndim == 0:
+                return False
+            lengths.add(int(item.shape[0]))
+            continue
+        if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+            lengths.add(len(item))
+            continue
+        return False
+    return len(lengths) == 1
+
+
+def _auto_table_artifact_from_preview(
+    result_preview: Any,
+    artifact_payloads: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    if artifact_payloads:
+        return None
+    if not isinstance(result_preview, Mapping):
+        return None
+
+    preview_type = result_preview.get("type")
+    rows = result_preview.get("rows")
+    columns = result_preview.get("columns")
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+        return None
+    if not rows or not all(isinstance(row, Mapping) for row in rows):
+        return None
+
+    if isinstance(columns, Sequence) and not isinstance(columns, (str, bytes, bytearray)):
+        columns_override = [str(column) for column in columns]
+    else:
+        columns_override = None
+
+    row_count_override = None
+    shape = result_preview.get("shape")
+    if preview_type == "dataframe" and isinstance(shape, Sequence) and shape:
+        try:
+            row_count_override = int(shape[0])
+        except (TypeError, ValueError):
+            row_count_override = None
+
+    return _table_artifact_payload(
+        "Result preview table",
+        list(rows),
+        description="Structured table generated from the Python result preview.",
+        row_count_override=row_count_override,
+        columns_override=columns_override,
+    )
+
+
+def _artifact_content_for_storage(content: Any) -> str | bytes:
+    if isinstance(content, bytes):
+        return content
+    if isinstance(content, str):
+        return content
+    return json.dumps(_artifact_safe(content), ensure_ascii=False, indent=2)
+
+
+def _execution_artifact_read(artifact: Any, session_id: str) -> ExecutionArtifact:
+    metadata = artifact.artifact_metadata if isinstance(artifact.artifact_metadata, dict) else {}
+    columns = metadata.get("columns")
+    rows = metadata.get("rows")
+    chart_spec = metadata.get("chart_spec")
+    title = metadata.get("title")
+    description = metadata.get("description")
+    source_message_id = metadata.get("source_message_id")
+    return ExecutionArtifact(
+        id=artifact.id,
+        name=artifact.name,
+        kind=artifact.kind,
+        type=str(metadata.get("type") or artifact.kind),
+        title=str(title) if title is not None else artifact.name,
+        description=str(description) if description is not None else None,
+        columns=_artifact_column_defs(columns),
+        rows=rows if isinstance(rows, list) else [],
+        chart_spec=chart_spec if isinstance(chart_spec, dict) else None,
+        download_url=f"/api/sessions/{session_id}/artifacts/{artifact.id}/download",
+        source_message_id=str(source_message_id) if source_message_id is not None else None,
+        path=artifact.path,
+        metadata=metadata,
+        created_at=artifact.created_at.isoformat(),
+    )
+
+
+def _artifact_column_defs(columns: Any) -> list[dict[str, Any]]:
+    if not isinstance(columns, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for column in columns:
+        if isinstance(column, Mapping):
+            key = str(column.get("key") or column.get("name") or column.get("label") or "")
+            if key:
+                normalized.append(
+                    {
+                        "key": key,
+                        "label": str(column.get("label") or key),
+                        "type": str(column.get("type") or "value"),
+                    }
+                )
+        elif column is not None:
+            key = str(column)
+            normalized.append({"key": key, "label": key, "type": "value"})
+    return normalized
+
+
+def _artifact_safe(value: Any, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        if np.isnan(value) or np.isinf(value):
+            return None
+        return value
+    if isinstance(value, np.generic):
+        return _artifact_safe(value.item(), depth=depth + 1)
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return value.isoformat()
+    if depth >= MAX_PREVIEW_DEPTH + 2:
+        return _safe_repr(value, MAX_TABLE_CELL_LENGTH)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _artifact_safe(item_value, depth=depth + 1)
+            for key, item_value in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_artifact_safe(item, depth=depth + 1) for item in list(value)[:MAX_TABLE_STORED_ROWS]]
+    if isinstance(value, set):
+        return [_artifact_safe(item, depth=depth + 1) for item in list(value)[:MAX_TABLE_STORED_ROWS]]
+    if isinstance(value, pd.DataFrame):
+        return _artifact_safe(value.to_dict(orient="records"), depth=depth + 1)
+    if isinstance(value, pd.Series):
+        return _artifact_safe(value.tolist(), depth=depth + 1)
+    if isinstance(value, np.ndarray):
+        return _artifact_safe(value.tolist(), depth=depth + 1)
+    attrs = safe_attrs(value)
+    if attrs.keys() != {"repr"}:
+        return _artifact_safe(_domain_record(attrs), depth=depth + 1)
+    return attrs["repr"]
+
+
+def _validated_chart_spec(name: str, chart_spec: Any, description: str | None = None) -> dict[str, Any]:
+    raw = dict(chart_spec) if isinstance(chart_spec, Mapping) else _json_safe(chart_spec)
     if not isinstance(raw, Mapping):
         raise ValueError("Chart spec must be a mapping with chart_type, data, x, and y")
 
     data_value = raw.get("data")
-    if isinstance(data_value, Mapping):
+    if isinstance(data_value, pd.DataFrame):
+        data = _records_from_table(data_value)
+    elif isinstance(data_value, Mapping):
         data = _records_from_table(data_value)
     elif isinstance(data_value, Sequence) and not isinstance(data_value, (str, bytes, bytearray)):
-        data = [item for item in data_value if isinstance(item, Mapping)]
+        data = [object_to_record(item) for item in data_value]
     else:
         data = []
 
@@ -625,12 +1121,14 @@ def _validated_chart_spec(name: str, chart_spec: Any) -> dict[str, Any]:
         id=str(raw.get("id") or new_id()),
         title=str(raw.get("title") or name),
         chart_type=chart_type,  # type: ignore[arg-type]
-        data=[dict(row) for row in data],
+        data=[_json_safe(dict(row)) for row in data],
         x=x_key,
         y=y_key,
         color=str(raw["color"]) if raw.get("color") else None,
-        description=str(raw["description"]) if raw.get("description") else None,
+        description=str(description or raw["description"]) if (description or raw.get("description")) else None,
     ).model_dump(exclude_none=True)
+    if raw.get("series"):
+        spec["series"] = str(raw["series"])
     if sampling:
         spec["_sampling"] = sampling
     return spec
@@ -693,7 +1191,10 @@ def _reduce_chart_data(
         if x in frame.columns and y in frame.columns and pd.api.types.is_numeric_dtype(frame[y]):
             grouped = frame.groupby(x, dropna=False, as_index=False)[y].sum()
             grouped = grouped.sort_values(y, key=lambda series: series.abs(), ascending=False)
-            reduced = _json_safe(grouped.head(MAX_CATEGORY_CHART_ROWS).to_dict(orient="records"))
+            reduced = [
+                _json_safe(dict(row))
+                for row in grouped.head(MAX_CATEGORY_CHART_ROWS).to_dict(orient="records")
+            ]
             return reduced, {
                 "method": "aggregate_top_categories",
                 "original_rows": original_count,
@@ -720,18 +1221,22 @@ def _reduce_chart_data(
 
 
 def _preview(value: Any) -> Any:
-    if value is None:
-        return None
-
-    try:
-        return introspect_object(value)
-    except Exception:
-        return _json_safe(value)
+    return _json_safe(value)
 
 
-def _json_safe(value: Any) -> Any:
+def _json_safe(
+    value: Any,
+    *,
+    depth: int = 0,
+    max_depth: int = MAX_PREVIEW_DEPTH,
+    max_items: int = MAX_PREVIEW_ITEMS,
+    max_string_length: int = MAX_PREVIEW_STRING_LENGTH,
+) -> Any:
     if value is None or isinstance(value, (str, int, bool)):
-        return value
+        return _truncate_preview_string(value, max_string_length) if isinstance(value, str) else value
+
+    if depth >= max_depth:
+        return _safe_repr(value, max_string_length)
 
     if isinstance(value, float):
         if np.isnan(value) or np.isinf(value):
@@ -739,44 +1244,208 @@ def _json_safe(value: Any) -> Any:
         return value
 
     if isinstance(value, np.generic):
-        return _json_safe(value.item())
+        return _json_safe(
+            value.item(),
+            depth=depth + 1,
+            max_depth=max_depth,
+            max_items=max_items,
+            max_string_length=max_string_length,
+        )
 
-    if isinstance(value, pd.Timestamp):
+    if isinstance(value, (pd.Timestamp, datetime, date)):
         return value.isoformat()
 
+    if isinstance(value, pd.DataFrame):
+        frame = value.head(MAX_PREVIEW_ROWS)
+        return {
+            "type": "dataframe",
+            "shape": [int(value.shape[0]), int(value.shape[1])],
+            "columns": [str(column) for column in value.columns.tolist()],
+            "rows": _json_safe(
+                frame.to_dict(orient="records"),
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=MAX_PREVIEW_ROWS,
+                max_string_length=max_string_length,
+            ),
+        }
+
+    if isinstance(value, pd.Series):
+        series = value.head(MAX_PREVIEW_ROWS)
+        return {
+            "type": "series",
+            "name": str(value.name) if value.name is not None else None,
+            "length": int(len(value)),
+            "dtype": str(value.dtype),
+            "values": _json_safe(
+                series.tolist(),
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=MAX_PREVIEW_ROWS,
+                max_string_length=max_string_length,
+            ),
+        }
+
+    if isinstance(value, np.ndarray):
+        sample = value.reshape(-1)[:max_items].tolist()
+        return {
+            "type": "ndarray",
+            "shape": [int(item) for item in value.shape],
+            "dtype": str(value.dtype),
+            "sample": _json_safe(
+                sample,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+            ),
+        }
+
     if isinstance(value, Mapping):
-        return {str(_json_safe(key)): _json_safe(item_value) for key, item_value in value.items()}
+        safe_items: dict[str, Any] = {}
+        for index, (key, item_value) in enumerate(value.items()):
+            if index >= max_items:
+                safe_items["_truncated"] = f"Showing first {max_items} items"
+                break
+            safe_items[str(_json_safe(key, depth=depth + 1, max_depth=max_depth, max_items=max_items))] = _json_safe(
+                item_value,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+            )
+        return safe_items
 
-    if isinstance(value, tuple):
-        return [_json_safe(item) for item in value]
-
-    if isinstance(value, list):
-        return [_json_safe(item) for item in value]
+    if isinstance(value, (list, tuple)):
+        item_limit = MAX_PREVIEW_ROWS if _looks_like_records(value) else max_items
+        return [
+            _json_safe(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+            )
+            for item in list(value)[:item_limit]
+        ]
 
     if isinstance(value, set):
-        return [_json_safe(item) for item in value]
+        return [
+            _json_safe(
+                item,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+            )
+            for item in list(value)[:max_items]
+        ]
 
     if hasattr(value, "tolist"):
         try:
-            return _json_safe(value.tolist())
+            return _json_safe(
+                value.tolist(),
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+            )
         except Exception:
             pass
 
-    return str(value)
+    attrs = safe_attrs(value)
+    if attrs.keys() != {"repr"}:
+        return {
+            "type": type(value).__qualname__,
+            "module": getattr(type(value), "__module__", None),
+            "repr": _safe_repr(value, max_string_length),
+            "attrs": _json_safe(
+                attrs,
+                depth=depth + 1,
+                max_depth=max_depth,
+                max_items=max_items,
+                max_string_length=max_string_length,
+            ),
+        }
+
+    return attrs["repr"]
+
+
+def _looks_like_records(value: Sequence[Any]) -> bool:
+    sample = list(value[: min(len(value), MAX_PREVIEW_ROWS)]) if hasattr(value, "__len__") else []
+    return bool(sample) and all(isinstance(item, Mapping) for item in sample)
+
+
+def _record_safe(value: Any, *, depth: int = 0, iso_dates: bool) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return value.isoformat() if iso_dates else value
+
+    if depth >= MAX_PREVIEW_DEPTH:
+        return _safe_repr(value)
+
+    if isinstance(value, np.generic):
+        return value.item()
+
+    if isinstance(value, np.ndarray):
+        return [
+            _record_safe(item, depth=depth + 1, iso_dates=iso_dates)
+            for item in value.reshape(-1)[:MAX_PREVIEW_ITEMS].tolist()
+        ]
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _record_safe(item_value, depth=depth + 1, iso_dates=iso_dates)
+            for key, item_value in list(value.items())[:MAX_PREVIEW_ITEMS]
+        }
+
+    if isinstance(value, (list, tuple, set)):
+        return [
+            _record_safe(item, depth=depth + 1, iso_dates=iso_dates)
+            for item in list(value)[:MAX_PREVIEW_ITEMS]
+        ]
+
+    attrs = safe_attrs(value)
+    if attrs.keys() != {"repr"}:
+        return _record_safe(_domain_record(attrs), depth=depth + 1, iso_dates=iso_dates)
+
+    return attrs["repr"]
+
+
+def _safe_repr(value: Any, max_length: int = MAX_PREVIEW_STRING_LENGTH) -> str:
+    try:
+        text = repr(value)
+    except Exception:
+        text = f"<unrepresentable {type(value).__qualname__}>"
+    return _truncate_preview_string(text, max_length)
+
+
+def _truncate_preview_string(value: str, max_length: int) -> str:
+    if len(value) <= max_length:
+        return value
+    return f"{value[:max_length]}...[truncated]"
 
 
 def _limit_preview(value: Any, max_length: int) -> Any:
+    safe_value = _json_safe(value)
     try:
-        encoded = json.dumps(_json_safe(value), ensure_ascii=False)
+        encoded = json.dumps(safe_value, ensure_ascii=False)
     except Exception:
-        encoded = json.dumps(str(value), ensure_ascii=False)
+        return _safe_repr(value)
 
     if len(encoded) <= max_length:
-        return _json_safe(value)
+        return safe_value
 
     return {
         "truncated": True,
-        "preview": encoded[:max_length],
+        "value": _json_safe(
+            value,
+            max_depth=max(1, MAX_PREVIEW_DEPTH - 2),
+            max_items=10,
+            max_string_length=300,
+        ),
     }
 
 

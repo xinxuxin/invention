@@ -170,3 +170,42 @@
 - Export downloads the current browser chat as Markdown and includes a checkbox to include or omit streamed trace/code/result events.
 - Added transcript formatting for user messages, final answers, state-change flag, artifacts, code, stdout/stderr, traceback, previews, and confirmation/error trace events.
 - Verified frontend build passes: `npm run build`.
+- Started SoftBank real-chat bugfix pass for executor result capture and runtime contract.
+- Added AST-based final-expression capture for `execute_python`, with result priority `RESULT`, `_agent_result`, legacy `_result`, then latest `preview(...)`.
+- Reworked execution `result_preview` serialization to return JSON-safe actual values instead of wrapping dict/list results in generic introspection profiles.
+- Added preview-safe handling for DataFrame, Series, ndarray, numpy scalars, datetime/date, mappings, sets, custom objects, and MissingPickleClass-like wrappers with bounded rows/items/string/depth.
+- Added runtime helpers exposed to generated code: `safe_attrs`, `object_to_record`, `objects_to_records`, and `to_dataframe`.
+- Added `dataset_profiles` and `active_dataset_profile` to the Python execution namespace.
+- Updated agent prompt/tool contract to state each execution is isolated, raw datasets have no `.profile`, useful results should be returned in the same execution, and helper functions should be preferred over regex-parsing reprs.
+- Added backend tests for final expression capture, columns/rows expression capture, DataFrame expression capture, MissingPickleClass-like extraction, execution isolation, dataset profile namespace, SoftBank-like tabular/schema workflows, and an agent-stream SoftBank-like prompt regression with one `execute_python` call.
+- Verified backend lint passes: `ruff check .`.
+- Verified backend tests pass: `59 passed`.
+- Started chat trace/thinking UX bugfix pass.
+- Replaced the static fake thinking bar with event-driven heuristic progress derived from actual assistant trace/code/artifact/final events.
+- Added honest live status labels such as preparing, inspecting data, running Python, creating artifacts, and finalizing answer, plus a streamed step count.
+- Added an activity shimmer while the SSE stream is open and waiting for the next event, without jumping to 100% before final/done.
+- Updated trace panel state so each new assistant message opens by default, active streaming trace updates automatically reopen a collapsed panel, and completed messages respect manual collapse.
+- Added near-bottom-aware chat autoscroll with a "New updates" indicator when the user has scrolled up.
+- Added exact SoftBank patent MissingPickleClass-like regression fixtures and tests covering `safe_attrs`, `object_to_record`, `to_dataframe`, final-expression tabular previews, schema classification, and fake-agent one-call tabular preview flow.
+- Manual frontend QA checklist: start a chat, confirm progress moves on trace/code events; collapse trace during streaming, confirm the next trace reopens it; scroll up during streaming, confirm "New updates" appears; collapse completed trace, confirm it stays collapsed.
+- Verified frontend build passes: `npm run build`.
+- Attempted frontend lint: `npm run lint` currently fails because no ESLint configuration file exists in the frontend project.
+- Verified backend lint passes: `ruff check .`.
+- Verified backend tests pass: `63 passed`.
+- Started remaining SoftBank chat-export bugfix pass.
+- Hardened `safe_attrs()` to unwrap top-level `__dict__` wrapper dictionaries, Pydantic-style wrapper fields, model dumps, and dicts that mix `__dict__` with private Pydantic metadata.
+- Updated `object_to_record()`, `objects_to_records()`, and `to_dataframe()` so domain fields are flattened, wrapper keys are dropped when better fields exist, list fields remain lists, and datetime/date values serialize to ISO strings in previews.
+- Changed preview truncation to preserve structured dict/list JSON instead of replacing large previews with one raw JSON string.
+- Updated the agent prompt to explicitly forbid importing injected helpers from `runtime`/`helpers` or using `globals()` to discover helpers.
+- Added agent auto-finalization after useful inspection/schema/preview result previews or created artifacts, with a trace event: "Found enough information; preparing final answer..."
+- Added regression tests for Pydantic-like `__dict__` wrappers, list/date preservation, no `__dict__` DataFrame columns, and agent stop-after-useful-inspection behavior.
+- Verified backend lint passes: `ruff check .`.
+- Verified backend tests pass: `66 passed`.
+- Verified frontend build passes: `npm run build`.
+- Attempted frontend lint: `npm run lint` still fails because no ESLint configuration file exists in the frontend project.
+- Started inline table/chart artifact rendering pass.
+- Upgraded `save_table()` to store structured table artifacts with title, description, column metadata, bounded rows, preview rows, row counts, truncation flags, and client-side CSV download availability.
+- Added automatic inline table artifact creation when Python returns a table-shaped `result_preview` such as `{"columns": [...], "rows": [...]}` or a DataFrame preview.
+- Updated `save_chart()` artifact metadata and prompt contract so chart/plot/visualization requests produce structured chart artifacts and optional underlying table artifacts.
+- Updated chat rendering so generated artifacts appear inline below the final answer, while the right artifact panel remains available.
+- Rebuilt artifact cards with TanStack Table previews, sticky headers, row/type badges, compact list/object cells, CSV download buttons, Recharts charts, and collapsed JSON previews.

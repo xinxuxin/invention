@@ -123,6 +123,14 @@ export type ExecutionArtifact = {
   id: string;
   name: string;
   kind: "table" | "chart" | "csv" | string;
+  type?: "table" | "chart" | "csv" | "json" | string | null;
+  title?: string | null;
+  description?: string | null;
+  columns?: Array<Record<string, unknown>>;
+  rows?: Array<Record<string, unknown>>;
+  chart_spec?: Record<string, unknown> | null;
+  download_url?: string | null;
+  source_message_id?: string | null;
   path: string;
   metadata: Record<string, unknown>;
   created_at?: string | null;

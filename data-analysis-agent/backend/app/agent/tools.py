@@ -16,7 +16,7 @@ EXECUTE_PYTHON_TOOL = {
         "properties": {
             "code": {
                 "type": "string",
-                "description": "Python code to execute. Available names: datasets (all session datasets by safe unique key), data (active dataset alias), pd, np, json, math, statistics, preview, save_table, save_chart, save_csv. save_chart expects title, chart_type, data, x, y, optional color/description.",
+                "description": "Python code to execute in an isolated namespace. Available names: datasets (raw session datasets by safe unique key), dataset_profiles, active_dataset_profile, data (active dataset alias), pd, np, json, math, statistics, safe_attrs, object_to_record, objects_to_records, to_dataframe, preview, save_table, save_chart, save_csv. Return useful values in the same execution with a final expression, RESULT = ..., preview(...), or an artifact helper. Raw datasets do not have a .profile attribute. For table/preview/top-k requests, call save_table(name, data, description=None). For chart/plot/visualize requests, call save_chart(name, chart_spec, description=None) with title, chart_type, data, x, y, optional series/color/description.",
             },
             "mutates_state": {
                 "type": "boolean",

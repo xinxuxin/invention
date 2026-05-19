@@ -47,12 +47,26 @@ def persist_artifact(
 
 
 def artifact_read(artifact: Artifact) -> ArtifactRead:
+    metadata = artifact.artifact_metadata if isinstance(artifact.artifact_metadata, dict) else {}
+    columns = metadata.get("columns")
+    rows = metadata.get("rows")
+    chart_spec = metadata.get("chart_spec")
+    description = metadata.get("description")
+    source_message_id = metadata.get("source_message_id")
     return ArtifactRead(
         id=artifact.id,
         name=artifact.name,
         kind=artifact.kind,
+        type=str(metadata.get("type") or artifact.kind),
+        title=str(metadata.get("title") or artifact.name),
+        description=str(description) if description is not None else None,
+        columns=_artifact_column_defs(columns),
+        rows=rows if isinstance(rows, list) else [],
+        chart_spec=chart_spec if isinstance(chart_spec, dict) else None,
+        download_url=f"/api/sessions/{artifact.session_id}/artifacts/{artifact.id}/download",
+        source_message_id=str(source_message_id) if source_message_id is not None else None,
         path=artifact.path,
-        metadata=artifact.artifact_metadata,
+        metadata=metadata,
         created_at=artifact.created_at,
     )
 
@@ -73,3 +87,24 @@ def safe_artifact_name(name: str) -> str:
 def stable_download_filename(artifact: Artifact) -> str:
     extension = artifact_extension(artifact.kind)
     return f"{Path(artifact.path).stem}.{extension}"
+
+
+def _artifact_column_defs(columns: Any) -> list[dict[str, Any]]:
+    if not isinstance(columns, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for column in columns:
+        if isinstance(column, Mapping):
+            key = str(column.get("key") or column.get("name") or column.get("label") or "")
+            if key:
+                normalized.append(
+                    {
+                        "key": key,
+                        "label": str(column.get("label") or key),
+                        "type": str(column.get("type") or "value"),
+                    }
+                )
+        elif column is not None:
+            key = str(column)
+            normalized.append({"key": key, "label": key, "type": "value"})
+    return normalized
