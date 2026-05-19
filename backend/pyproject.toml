@@ -28,5 +28,8 @@ dev = [
 line-length = 100
 target-version = "py311"
 
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
