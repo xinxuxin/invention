@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 import { motion } from "framer-motion";
 import {
   Activity,
+  AlertCircle,
+  CheckCircle2,
   Database,
   FileDown,
   GitBranch,
@@ -29,6 +31,13 @@ import { useChat } from "../hooks/useChat";
 import { useHealth } from "../hooks/useHealth";
 import { useWorkspace } from "../hooks/useWorkspace";
 
+type ToastMessage = {
+  id: string;
+  tone: "success" | "error";
+  title: string;
+  message: string;
+};
+
 export function Dashboard() {
   const health = useHealth();
   const workspace = useWorkspace();
@@ -41,9 +50,27 @@ export function Dashboard() {
   const isOnline = health.status === "online";
   const branch = workspace.activeBranch;
   const artifacts = [...workspace.exportArtifacts, ...chat.artifacts];
+  const toasts = [
+    workspace.sessionError
+      ? { id: "session", tone: "error" as const, title: "Session error", message: workspace.sessionError }
+      : null,
+    workspace.upload.status === "error" && workspace.upload.message
+      ? { id: "upload-error", tone: "error" as const, title: "Upload failed", message: workspace.upload.message }
+      : null,
+    workspace.upload.status === "success" && workspace.upload.message
+      ? { id: "upload-success", tone: "success" as const, title: "Upload complete", message: workspace.upload.message }
+      : null,
+    workspace.exportStatus === "error" && workspace.exportMessage
+      ? { id: "export-error", tone: "error" as const, title: "Export failed", message: workspace.exportMessage }
+      : null,
+    workspace.exportStatus === "success" && workspace.exportMessage
+      ? { id: "export-success", tone: "success" as const, title: "CSV ready", message: workspace.exportMessage }
+      : null,
+  ].filter((toast): toast is ToastMessage => toast !== null);
 
   return (
     <main className="min-h-screen p-4 text-foreground sm:p-6 lg:p-8">
+      <ToastStack toasts={toasts} />
       <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-[1540px] flex-col gap-5">
         <header className="flex flex-col gap-4 rounded-lg border border-white/80 bg-white/64 px-5 py-4 shadow-glow backdrop-blur-xl md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-3">
@@ -401,6 +428,45 @@ function StatusPill({
       />
       {icon}
       {label}
+    </div>
+  );
+}
+
+function ToastStack({ toasts }: { toasts: ToastMessage[] }) {
+  if (toasts.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="fixed right-4 top-4 z-50 w-[min(360px,calc(100vw-2rem))] space-y-2">
+      {toasts.map((toast) => (
+        <motion.div
+          key={toast.id}
+          initial={{ opacity: 0, x: 18, scale: 0.98 }}
+          animate={{ opacity: 1, x: 0, scale: 1 }}
+          className={`rounded-lg border bg-white/95 p-4 shadow-xl backdrop-blur ${
+            toast.tone === "success" ? "border-emerald-200" : "border-rose-200"
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            <span
+              className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${
+                toast.tone === "success" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"
+              }`}
+            >
+              {toast.tone === "success" ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : (
+                <AlertCircle className="h-4 w-4" />
+              )}
+            </span>
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-slate-950">{toast.title}</p>
+              <p className="mt-1 max-h-16 overflow-hidden text-sm leading-5 text-slate-600">{toast.message}</p>
+            </div>
+          </div>
+        </motion.div>
+      ))}
     </div>
   );
 }

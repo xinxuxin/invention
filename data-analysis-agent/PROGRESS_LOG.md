@@ -132,3 +132,15 @@
 - Verified full backend tests pass: `45 passed`.
 - Verified backend lint passes: `ruff check .`.
 - Verified frontend build passes: `npm run build`.
+- Started final README, stretch-goal audit, and polish phase.
+- Added `GET /api/sessions` to list persisted sessions for cross-session restore.
+- Updated frontend workspace bootstrap from tab-only `sessionStorage` to durable `localStorage`, with backend latest-session fallback.
+- Added clarification behavior/test coverage for ambiguous destructive requests before mutation.
+- Added lightweight toast stack for upload/export/session success and error states.
+- Rewrote root README with overview, architecture, general-agent rationale, setup, local run, upload, agent loop, streamed trace, mutations, branching, multi-dataset support, CSV export, visualizations, security, tradeoffs, future improvements, stretch-goal checklist, and demo prompts.
+- Added actual dashboard screenshot at `docs/screenshots/dashboard.png`.
+- Verified no OpenAI API key or secret substring is present in tracked project files.
+- Ran a real OpenAI API smoke test with the provided key as an ephemeral environment variable only; chat stream returned trace/code result/final answer successfully.
+- Verified full backend tests pass: `47 passed`.
+- Verified backend lint passes: `ruff check .`.
+- Verified frontend build passes: `npm run build`.

@@ -21,6 +21,10 @@ export type AnalysisSession = {
   branches: Branch[];
 };
 
+export type SessionListResponse = {
+  sessions: AnalysisSession[];
+};
+
 export type VersionNode = {
   id: string;
   branch_id: string;

@@ -23,3 +23,7 @@ class SessionRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     branches: list[BranchRead]
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionRead]

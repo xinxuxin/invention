@@ -9,6 +9,7 @@ import {
   forkVersion as forkVersionRequest,
   getHistory,
   getSession,
+  listSessions,
   listDatasets,
   rollbackVersion as rollbackVersionRequest,
   uploadDatasets,
@@ -32,6 +33,7 @@ const initialUploadState: UploadState = {
 };
 
 const SESSION_STORAGE_KEY = "data-analysis-agent-session-id";
+const LEGACY_SESSION_STORAGE_KEY = SESSION_STORAGE_KEY;
 let sessionBootstrap: Promise<{
   session: AnalysisSession;
   datasets: Dataset[];
@@ -325,17 +327,27 @@ async function bootstrapSession() {
   }
 
   sessionBootstrap = (async () => {
-    const existingId = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    const existingId =
+      window.localStorage.getItem(SESSION_STORAGE_KEY) ??
+      window.sessionStorage.getItem(LEGACY_SESSION_STORAGE_KEY);
     if (existingId) {
       try {
         return await loadWorkspace(existingId);
       } catch {
-        window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        window.localStorage.removeItem(SESSION_STORAGE_KEY);
+        window.sessionStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
       }
     }
 
+    const existingSessions = await listSessions();
+    const latestSession = existingSessions.sessions[0];
+    if (latestSession) {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, latestSession.id);
+      return await loadWorkspace(latestSession.id);
+    }
+
     const createdSession = await createSession("Demo workspace");
-    window.sessionStorage.setItem(SESSION_STORAGE_KEY, createdSession.id);
+    window.localStorage.setItem(SESSION_STORAGE_KEY, createdSession.id);
     return await loadWorkspace(createdSession.id);
   })();
 

@@ -59,6 +59,7 @@ that local pickle as a smoke test for externally generated custom-class data.
 
 - `GET /health` returns service status for local development and frontend connectivity checks.
 - `POST /api/sessions` creates an analysis session and a default `main` branch.
+- `GET /api/sessions` lists persisted sessions for cross-session restore.
 - `GET /api/sessions/{session_id}` returns session metadata and branches.
 - `POST /api/sessions/{session_id}/datasets` uploads one or more `.pkl` files, stores originals and initial snapshots, creates initial version nodes, and returns generic object profiles.
 - `GET /api/sessions/{session_id}/datasets` lists datasets in a session.
@@ -143,6 +144,14 @@ operations also create new version nodes so history remains append-only.
 
 Version parent links are tracked per dataset, so mutating one dataset does not attach its history to
 another dataset's latest version.
+
+## Cross-Session Persistence
+
+Sessions, branches, datasets, versions, confirmations, and artifacts are stored in SQLite, while
+original pickle files, snapshots, and artifact payloads are stored on disk under `STORAGE_DIR`.
+`GET /api/sessions` returns persisted sessions ordered by update time. The frontend stores the active
+session id in `localStorage` and falls back to the latest persisted backend session when opening the
+app in a new browser session.
 
 ## Security Note
 

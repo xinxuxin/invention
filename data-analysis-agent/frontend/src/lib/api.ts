@@ -11,6 +11,7 @@ import type {
   ExportResponse,
   HealthResponse,
   HistoryResponse,
+  SessionListResponse,
   VersionActionResponse,
 } from "../types/api";
 
@@ -36,6 +37,10 @@ export async function createSession(name?: string): Promise<AnalysisSession> {
 
 export async function getSession(sessionId: string): Promise<AnalysisSession> {
   return request<AnalysisSession>(`/api/sessions/${sessionId}`);
+}
+
+export async function listSessions(): Promise<SessionListResponse> {
+  return request<SessionListResponse>("/api/sessions");
 }
 
 export async function listDatasets(sessionId: string): Promise<DatasetListResponse> {

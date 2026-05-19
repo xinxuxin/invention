@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 from app.db.session import get_session
 from app.models.entities import AnalysisSession, Branch, Dataset, VersionNode, new_id, utc_now
 from app.schemas.dataset import DatasetListResponse, DatasetRead, DatasetUploadResponse
-from app.schemas.session import SessionCreate, SessionRead
+from app.schemas.session import SessionCreate, SessionListResponse, SessionRead
 from app.services.introspection import introspect_object
 from app.services.versioning import (
     active_branch,
@@ -35,6 +35,22 @@ def create_session(payload: SessionCreate, db: Session = Depends(get_session)) -
     db.refresh(branch)
 
     return _session_read(analysis_session, [branch])
+
+
+@router.get("", response_model=SessionListResponse)
+def list_analysis_sessions(db: Session = Depends(get_session)) -> SessionListResponse:
+    sessions = list(db.exec(select(AnalysisSession).order_by(AnalysisSession.updated_at.desc())).all())
+    branches = list(db.exec(select(Branch)).all())
+    branches_by_session: dict[str, list[Branch]] = {}
+    for branch in branches:
+        branches_by_session.setdefault(branch.session_id, []).append(branch)
+
+    return SessionListResponse(
+        sessions=[
+            _session_read(analysis_session, branches_by_session.get(analysis_session.id, []))
+            for analysis_session in sessions
+        ]
+    )
 
 
 @router.get("/{session_id}", response_model=SessionRead)

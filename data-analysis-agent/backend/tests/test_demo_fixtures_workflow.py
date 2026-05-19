@@ -190,6 +190,23 @@ def test_fake_agent_executor_error_recovery_path(client: TestClient) -> None:
     assert events[-2]["type"] == "final_answer"
 
 
+def test_fake_agent_asks_clarification_before_ambiguous_destructive_write(client: TestClient) -> None:
+    session_id = _create_session(client)
+    dataset = _upload_fixture(client, session_id, "dataframe_transactions.pkl")
+
+    events = _chat(
+        client,
+        session_id,
+        dataset["id"],
+        "Drop rows with missing values in the most important identifier field.",
+    )
+
+    assert not any(event["type"] == "code_result_summary" for event in events)
+    assert events[-2]["type"] == "final_answer"
+    assert "which identifier field" in events[-2]["answer"].lower()
+    assert events[-2]["state_changed"] is False
+
+
 @pytest.mark.skipif(not SOFTBANK_FIXTURE.exists(), reason="Local SoftBank demo pickle is not present")
 def test_local_softbank_pickle_uploads_and_profiles(client: TestClient) -> None:
     session_id = _create_session(client)

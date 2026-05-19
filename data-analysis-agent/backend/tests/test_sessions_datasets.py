@@ -59,6 +59,18 @@ def test_create_session_creates_main_branch(client: TestClient) -> None:
     assert fetched.json()["id"] == payload["id"]
 
 
+def test_list_sessions_returns_persisted_sessions(client: TestClient) -> None:
+    first = client.post("/api/sessions", json={"name": "First"})
+    second = client.post("/api/sessions", json={"name": "Second"})
+
+    response = client.get("/api/sessions")
+    sessions = response.json()["sessions"]
+
+    assert response.status_code == 200
+    assert [session["id"] for session in sessions] == [second.json()["id"], first.json()["id"]]
+    assert sessions[0]["branches"][0]["name"] == "main"
+
+
 def test_upload_dataframe_pickle_returns_dataframe_profile(client: TestClient) -> None:
     session_id = _create_session(client)
     frame = pd.DataFrame(

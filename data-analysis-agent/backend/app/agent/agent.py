@@ -148,6 +148,18 @@ class FakeAgentModelClient:
             return _fake_tool_response("final_answer", {"answer": answer, "state_changed": state_changed})
 
         prompt = _latest_user_request(input_items).lower()
+        if "most important identifier" in prompt or "ambiguous" in prompt:
+            return _fake_tool_response(
+                "final_answer",
+                {
+                    "answer": (
+                        "I need one clarification before changing data: which identifier field "
+                        "should define the missing-value drop?"
+                    ),
+                    "state_changed": False,
+                },
+            )
+
         if "error recovery" in prompt or "retry path" in prompt:
             self.recovery_started = True
             return _fake_tool_response(
