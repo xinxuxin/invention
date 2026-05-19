@@ -722,7 +722,30 @@ def _asks_for_filing_date_range(message: str) -> bool:
 
 
 def _asks_for_chart_domain(message: str) -> bool:
-    return asks_for_chart(message) and any(marker in message for marker in ("line chart", "bar chart", "filing", "year", "country"))
+    if asks_for_chart(message) and "dataset" in message and any(
+        marker in message for marker in ("comparison", "record count", "record counts", "uploaded")
+    ):
+        return True
+    return asks_for_chart(message) and any(
+        marker in message
+        for marker in (
+            "line chart",
+            "bar chart",
+            "pie chart",
+            "scatter",
+            "filing",
+            "year",
+            "country",
+            "revenue",
+            "active_users",
+            "latency",
+            "error_rate",
+            "temperature",
+            "alert",
+            "status",
+            "category",
+        )
+    )
 
 
 def _first_artifact(artifacts: Sequence[ExecutionArtifact], kind: str) -> ExecutionArtifact | None:
@@ -826,6 +849,27 @@ def _chart_intent_issue(message: str, artifact: ExecutionArtifact) -> str | None
     data = spec.get("data")
     first_row = data[0] if isinstance(data, list) and data and isinstance(data[0], Mapping) else {}
     row_keys = {str(key).lower() for key in first_row.keys()} if isinstance(first_row, Mapping) else set()
+    count_like = _is_count_field(y) or any(_is_count_field(key) for key in row_keys)
+    if title == "dataset chart" and any(
+        marker in message
+        for marker in (
+            "alert",
+            "country",
+            "revenue",
+            "active_users",
+            "latency",
+            "error_rate",
+            "temperature",
+            "filing",
+            "status",
+            "category",
+        )
+    ) or (
+        title == "dataset chart"
+        and "dataset" in message
+        and any(marker in message for marker in ("comparison", "record count", "record counts", "uploaded"))
+    ):
+        return "Domain-specific chart request was answered with the generic fallback title 'Dataset chart'."
 
     if "line chart" in message and chart_type != "line":
         return "User requested a line chart, but the chart artifact is not a line chart."
@@ -833,6 +877,41 @@ def _chart_intent_issue(message: str, artifact: ExecutionArtifact) -> str | None
         return "Time-series chart request should prefer a line chart."
     if "bar chart" in message and "line chart" not in message and chart_type != "bar":
         return "User requested a bar chart, but the chart artifact is not a bar chart."
+    if "alert" in message and "type" in message:
+        if x not in {"alert_type", "type"} and not ({"alert_type", "type"} & row_keys):
+            return "Alert-count chart does not use alert_type/type as the x field."
+        if not count_like:
+            return "Alert-count chart does not use a count-like y field."
+        if x == "row":
+            return "Alert-count chart looks like a generic row-count fallback instead of alert counts by type."
+    if "dataset" in message and any(marker in message for marker in ("record count", "record counts", "approximate record", "comparison chart")):
+        if x not in {"dataset", "dataset_name", "name"} and not ({"dataset", "dataset_name", "name"} & row_keys):
+            return "Dataset comparison chart does not use dataset/dataset_name as the x field."
+        if y not in {"count", "row_count", "length", "record_count", "size"} and not count_like:
+            return "Dataset comparison chart does not use a count/length y field."
+        if isinstance(data, list) and len(data) <= 1:
+            return "Dataset comparison chart has too few rows for a multi-dataset comparison."
+    if ("active_users" in message or ("daily" in message and "active" in message)) and not (
+        ("date" in x or x in {"day"}) and ("active" in y or "active_users" in row_keys)
+    ):
+        return "Daily active users chart does not use date and active_users fields."
+    if "latency" in message and "error_rate" in message:
+        if chart_type != "scatter":
+            return "Latency/error-rate request should create a scatter chart."
+        if "latency" not in x and not any("latency" in key for key in row_keys):
+            return "Latency/error chart does not use latency on the x field."
+        if "error" not in y and not any("error" in key for key in row_keys):
+            return "Latency/error chart does not use error_rate on the y field."
+    if "temperature" in message and ("hour" in message or "time" in message):
+        if x not in {"hour", "timestamp", "time"} and not ({"hour", "timestamp"} & row_keys):
+            return "Temperature-by-hour chart does not use hour/timestamp as the x field."
+        if "temperature" not in y and not any("temperature" in key for key in row_keys):
+            return "Temperature chart does not use an average_temperature/temperature y field."
+    if "revenue" in message and ("country" in message or "countries" in message):
+        if x != "country" and "country" not in row_keys:
+            return "Revenue-by-country chart does not use country as the x field."
+        if "revenue" not in y and not any("revenue" in key for key in row_keys):
+            return "Revenue-by-country chart does not use a revenue y field."
     if "filing" in message or "year" in message:
         if x not in {"filing_year", "year"} and not ({"filing_year", "year"} & row_keys):
             return "Filings-by-year chart does not use a filing_year/year x field."

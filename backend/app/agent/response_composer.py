@@ -321,8 +321,13 @@ def _parse_structured_text(value: str) -> Any | None:
 def _structural_findings(preview: Mapping[str, Any]) -> list[str]:
     findings: list[str] = []
     object_type = preview.get("object_type") or preview.get("type")
+    display_type = _display_object_type(object_type) if object_type else ""
     if object_type and object_type != "dataframe":
-        findings.append(f"Object type: {_display_object_type(object_type)}.")
+        findings.append(f"Object type: {display_type}.")
+
+    top_level_keys = preview.get("top_level_keys")
+    if isinstance(top_level_keys, list) and top_level_keys:
+        findings.append(f"Top-level keys: {', '.join(str(key) for key in top_level_keys[:10])}.")
 
     length = (
         preview.get("length")
@@ -332,16 +337,15 @@ def _structural_findings(preview: Mapping[str, Any]) -> list[str]:
         or preview.get("approximate_size")
     )
     if isinstance(length, (int, float)) and not isinstance(length, bool):
-        findings.append(f"Records/items observed: {int(length):,}.")
+        if display_type == "dict" or top_level_keys:
+            findings.append(f"Top-level keys observed: {int(length):,}.")
+        else:
+            findings.append(f"Records/items observed: {int(length):,}.")
 
     fields = _representative_fields(preview)
     if fields:
         findings.append(f"Representative fields include {', '.join(fields[:10])}.")
         findings.extend(_semantic_field_group_findings(fields))
-
-    top_level_keys = preview.get("top_level_keys")
-    if isinstance(top_level_keys, list) and top_level_keys:
-        findings.append(f"Top-level keys: {', '.join(str(key) for key in top_level_keys[:10])}.")
 
     tables = preview.get("tables_detected")
     if isinstance(tables, list) and tables:
@@ -357,6 +361,12 @@ def _structural_findings(preview: Mapping[str, Any]) -> list[str]:
 
     collections = preview.get("record_collections_detected")
     if isinstance(collections, list) and collections:
+        primary = _primary_collection(preview)
+        if primary:
+            path = primary.get("path") or primary.get("name")
+            count = primary.get("count")
+            if path and isinstance(count, (int, float)) and not isinstance(count, bool):
+                findings.append(f"Primary record collection: {path} ({int(count):,} records).")
         names = [str(item.get("path") or item.get("name")) for item in collections if isinstance(item, Mapping)]
         if names:
             findings.append(f"Record collections: {', '.join(names[:8])}.")
@@ -368,6 +378,24 @@ def _structural_findings(preview: Mapping[str, Any]) -> list[str]:
             findings.append(f"Custom objects detected: {', '.join(_dedupe(names)[:6])}.")
 
     return findings
+
+
+def _primary_collection(preview: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    likely = preview.get("likely_primary_records")
+    if isinstance(likely, list):
+        for item in likely:
+            if isinstance(item, Mapping):
+                return item
+    collections = preview.get("record_collections_detected")
+    if not isinstance(collections, list):
+        return None
+    candidates = [item for item in collections if isinstance(item, Mapping)]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: item.get("count") if isinstance(item.get("count"), (int, float)) else -1,
+    )
 
 
 def _representative_fields(preview: Mapping[str, Any]) -> list[str]:

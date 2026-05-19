@@ -274,6 +274,72 @@ def test_line_chart_request_rejects_bar_chart() -> None:
     assert "line chart" in " ".join(result.reasons).lower()
 
 
+def test_alert_count_chart_rejects_generic_fallback() -> None:
+    chart = ExecutionArtifact(
+        id="chart-1",
+        name="Dataset chart",
+        kind="chart",
+        type="chart",
+        title="Dataset chart",
+        chart_spec={
+            "chart_type": "bar",
+            "data": [{"row": 0, "record_count": 1}],
+            "x": "row",
+            "y": "record_count",
+        },
+        path="/tmp/chart.json",
+        metadata={
+            "chart_spec": {
+                "chart_type": "bar",
+                "data": [{"row": 0, "record_count": 1}],
+                "x": "row",
+                "y": "record_count",
+            }
+        },
+    )
+    result = ResultVerifier().verify(
+        user_message="Create a bar chart of alert counts by alert type.",
+        execution_result=_execution(result_preview={"ok": True}),
+        artifacts_created_this_turn=[chart],
+    )
+
+    assert result.severity == "retry"
+    assert "Dataset chart" in " ".join(result.reasons)
+
+
+def test_dataset_comparison_chart_requires_dataset_axis() -> None:
+    chart = ExecutionArtifact(
+        id="chart-1",
+        name="Dataset chart",
+        kind="chart",
+        type="chart",
+        title="Dataset chart",
+        chart_spec={
+            "chart_type": "bar",
+            "data": [{"row": 0, "record_count": 1}],
+            "x": "row",
+            "y": "record_count",
+        },
+        path="/tmp/chart.json",
+        metadata={
+            "chart_spec": {
+                "chart_type": "bar",
+                "data": [{"row": 0, "record_count": 1}],
+                "x": "row",
+                "y": "record_count",
+            }
+        },
+    )
+    result = ResultVerifier().verify(
+        user_message="Create a comparison chart showing approximate record counts for each uploaded dataset.",
+        execution_result=_execution(result_preview={"ok": True}),
+        artifacts_created_this_turn=[chart],
+    )
+
+    assert result.severity == "retry"
+    assert "Dataset chart" in " ".join(result.reasons)
+
+
 def test_country_count_table_matches_country_request() -> None:
     table = ExecutionArtifact(
         id="table-1",

@@ -145,6 +145,11 @@ def main() -> int:
         screenshots_dir=screenshots_dir,
     )
     browser_warning = browser.start()
+    if not (args.browser_smoke or args.include_screenshots):
+        browser_warning = (
+            browser_warning
+            or "Browser smoke and screenshots were not requested; artifact render checks were API-only."
+        )
 
     all_questions = _questions_for_suites(suite_names)
     if args.quick:
@@ -535,7 +540,6 @@ def _evaluate_question(
             warning_reasons.append(reason)
     if debug_trace:
         warning_reasons.extend(_debug_warnings(events))
-
     final_answer = str(final.get("answer") or "")
     status = "fail" if failure_reasons else "warning" if warning_reasons else "pass"
     return QuestionResult(
@@ -675,6 +679,21 @@ def _run_check(
         return _ok(str(spec.get("x") or "").lower() in {"filing_year", "year"} and str(spec.get("y") or "").lower() in {"filing_count", "count"}, "Filings chart x/y fields invalid.")
     if check == "chart_title_not_fake":
         return _ok("fake agent chart" not in json.dumps(artifacts, ensure_ascii=False).lower(), "Fake chart title leaked.")
+    if check == "no_generic_dataset_chart":
+        return _ok("dataset chart" not in json.dumps(artifacts, ensure_ascii=False).lower(), "Generic Dataset chart was used for a domain-specific request.")
+    if check == "all_records_full_table":
+        return _all_records_full_table_ok(artifacts, artifact_contents, events)
+    if check == "alert_count_chart_fields":
+        return _alert_count_chart_ok(artifacts, artifact_contents)
+    if check == "dataset_comparison_chart_fields":
+        return _dataset_comparison_chart_ok(artifacts, artifact_contents, minimum_rows=3)
+    if check == "llm_verifier_called_or_fallback":
+        return _ok(
+            _llm_verifier_called(events) or _llm_verifier_fallback_used(events),
+            "Semantic verifier was not called and no deterministic fallback was recorded.",
+        )
+    if check == "zero_affected_no_confirmation_or_confirmation_required":
+        return _zero_affected_confirmation_ok(events)
     if check == "clarification_answer":
         return _ok("please choose" in answer_lower or "clarification" in answer_lower or "which rule" in answer_lower, "Expected clarification answer.")
     if check == "history_answer":
@@ -1403,6 +1422,87 @@ def _has_valid_chart_data(artifacts: list[dict[str, Any]], artifact_contents: di
     return False
 
 
+def _all_records_full_table_ok(
+    artifacts: list[dict[str, Any]],
+    artifact_contents: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    titles = [str(artifact.get("title") or artifact.get("name") or "").lower() for artifact in artifacts]
+    if any(title == "result preview table" for title in titles):
+        return False, "All-record task was satisfied by generic Result preview table."
+    code_blob = "\n".join(str(event.get("code") or "") for event in events if event.get("type") == "code_started").lower()
+    if "result = df.head(" in code_blob and "save_table" not in code_blob and "save_csv" not in code_blob:
+        return False, "All-record task only returned df.head(...) without a full artifact."
+    if "head(5)" in code_blob and "save_table" not in code_blob and "save_csv" not in code_blob:
+        return False, "All-record task appears to use only a 5-row preview."
+    tables = _table_documents(artifacts, artifact_contents)
+    if not tables:
+        return False, "All-record task did not create a table artifact."
+    for artifact, document in zip([item for item in artifacts if item.get("kind") == "table"], tables, strict=False):
+        title = str(artifact.get("title") or artifact.get("name") or "").lower()
+        row_count = _table_row_count(document)
+        total_count = document.get("source_total_row_count") or document.get("total_row_count") or document.get("row_count")
+        if row_count > 5 or (isinstance(total_count, (int, float)) and int(total_count) == row_count):
+            return True, ""
+        if "preview" not in title and row_count == 5 and total_count == 5:
+            return True, ""
+    return False, "Table artifact does not prove it contains the full requested record set."
+
+
+def _alert_count_chart_ok(artifacts: list[dict[str, Any]], artifact_contents: dict[str, Any]) -> tuple[bool, str]:
+    spec = _first_chart_spec(artifacts, artifact_contents)
+    x = str(spec.get("x") or "").lower()
+    y = str(spec.get("y") or "").lower()
+    data = spec.get("data")
+    titles = " ".join(str(artifact.get("title") or artifact.get("name") or "") for artifact in artifacts).lower()
+    if "dataset chart" in titles:
+        return False, "Alert-count request used generic Dataset chart."
+    if x not in {"alert_type", "type"}:
+        return False, f"Alert-count chart x field should be alert_type/type, got {x!r}."
+    if y not in {"count", "alert_count", "record_count"} and not y.endswith("_count"):
+        return False, f"Alert-count chart y field should be count-like, got {y!r}."
+    if not isinstance(data, list) or not data:
+        return False, "Alert-count chart has no data rows."
+    first = data[0] if isinstance(data[0], dict) else {}
+    if x not in first and "alert_type" not in first and "type" not in first:
+        return False, "Alert-count chart rows do not contain alert_type/type."
+    return True, ""
+
+
+def _dataset_comparison_chart_ok(
+    artifacts: list[dict[str, Any]],
+    artifact_contents: dict[str, Any],
+    *,
+    minimum_rows: int,
+) -> tuple[bool, str]:
+    spec = _first_chart_spec(artifacts, artifact_contents)
+    x = str(spec.get("x") or "").lower()
+    y = str(spec.get("y") or "").lower()
+    data = spec.get("data")
+    titles = " ".join(str(artifact.get("title") or artifact.get("name") or "") for artifact in artifacts).lower()
+    if "dataset chart" in titles:
+        return False, "Dataset comparison used generic Dataset chart."
+    if x not in {"dataset", "dataset_name", "name"}:
+        return False, f"Dataset comparison x field should identify datasets, got {x!r}."
+    if y not in {"count", "row_count", "length", "record_count", "size"} and not y.endswith("_count"):
+        return False, f"Dataset comparison y field should be count/length-like, got {y!r}."
+    if not isinstance(data, list) or len(data) < minimum_rows:
+        return False, f"Dataset comparison chart has {len(data) if isinstance(data, list) else 0} rows; expected at least {minimum_rows}."
+    return True, ""
+
+
+def _zero_affected_confirmation_ok(events: list[dict[str, Any]]) -> tuple[bool, str]:
+    final = _last_event(events, "final_answer")
+    answer = str(final.get("answer") or "").lower()
+    confirmation = any(event.get("type") == "confirmation_required" for event in events)
+    affected_zero = "found **0**" in answer or "found 0" in answer or "0 matching" in answer
+    if affected_zero and confirmation:
+        return False, "Zero-affected mutation still emitted confirmation_required."
+    if not affected_zero and not confirmation:
+        return False, "Mutation request neither reported zero affected rows nor requested confirmation."
+    return True, ""
+
+
 def _first_chart_spec(artifacts: list[dict[str, Any]], artifact_contents: dict[str, Any]) -> dict[str, Any]:
     for artifact in artifacts:
         if artifact.get("kind") == "chart":
@@ -1433,7 +1533,7 @@ SUITES: dict[str, list[EvalQuestion]] = {
                 "no_raw_json",
                 "mentions_representative_fields",
             ],
-            ["answer_not_too_short"],
+            ["answer_not_too_short", "llm_verifier_called_or_fallback"],
         ),
         EvalQuestion(
             "tabular_preview",
@@ -1461,6 +1561,7 @@ SUITES: dict[str, list[EvalQuestion]] = {
             "schema_summary",
             "Summarize the schema of this patent metadata dataset. Which fields are scalar fields, which are dates, and which are list-like fields?",
             ["schema_terms", "schema_domain_fields", "no_pydantic_in_answer", "state_changed_false"],
+            ["llm_verifier_called_or_fallback"],
         ),
         EvalQuestion(
             "top_countries",
@@ -1511,9 +1612,9 @@ SUITES: dict[str, list[EvalQuestion]] = {
         EvalQuestion("persistence_restart_check", "Scripted backend restart persistence check", [], special="restart_persistence"),
     ],
     "generated_nested_customer_events": [
-        EvalQuestion("inspect_nested", "What's in this file? Explain the structure in plain English.", [{"any_of": ["customer", "event", "support", "order"]}, {"any_of": ["metadata", "customers", "lookup_tables"]}], dataset_key="nested_customer_events"),
+        EvalQuestion("inspect_nested", "What's in this file? Explain the structure in plain English.", [{"any_of": ["customer", "event", "support", "order"]}, {"any_of": ["metadata", "customers", "lookup_tables"]}], warnings=["llm_verifier_called_or_fallback"], dataset_key="nested_customer_events"),
         EvalQuestion("customer_preview", "Show a tabular preview of customers with customer_id, country, segment, joined_at, churn_risk.", ["table_artifact", {"table_required_columns": ["customer_id", "country", "segment", "joined_at", "churn_risk"]}], dataset_key="nested_customer_events"),
-        EvalQuestion("normalize_events", "Normalize all purchase events into a table with customer_id, event_id, timestamp, channel, event_type, order_total.", ["table_artifact", {"table_required_columns": ["customer_id", "event_id", "timestamp", "channel", "event_type", "order_total"]}, {"min_rows": 1}], dataset_key="nested_customer_events"),
+        EvalQuestion("normalize_events", "Normalize all purchase events into a table with customer_id, event_id, timestamp, channel, event_type, order_total.", ["table_artifact", {"table_required_columns": ["customer_id", "event_id", "timestamp", "channel", "event_type", "order_total"]}, {"min_rows": 1}, "all_records_full_table"], dataset_key="nested_customer_events"),
         EvalQuestion("revenue_by_country_chart", "Create a bar chart of total order revenue by country.", ["chart_artifact", "chart_type_bar", "chart_data_valid", {"chart_x": ["country"]}], dataset_key="nested_customer_events"),
         EvalQuestion("product_revenue", "Which products generate the most revenue? Remember items are nested inside events. Show a table.", ["table_artifact", {"any_of": ["product", "sku", "revenue"]}], dataset_key="nested_customer_events"),
         EvalQuestion("support_churn", "Find customers with high churn risk and support tickets. Show a table.", ["table_artifact", {"any_of": ["churn", "support", "ticket"]}], dataset_key="nested_customer_events"),
@@ -1521,7 +1622,7 @@ SUITES: dict[str, list[EvalQuestion]] = {
         EvalQuestion("ambiguous_clean_nested", "Clean this dataset.", ["clarification_answer", "state_changed_false"], dataset_key="nested_customer_events"),
     ],
     "generated_mixed_dataframe_numpy_bundle": [
-        EvalQuestion("inspect_bundle", "What's in this file? List all top-level keys and object types.", [{"must_contain": ["users", "orders"]}, {"any_of": ["embedding", "cohort", "array"]}], dataset_key="mixed_dataframe_numpy_bundle"),
+        EvalQuestion("inspect_bundle", "What's in this file? List all top-level keys and object types.", [{"must_contain": ["users", "orders"]}, {"any_of": ["embedding", "cohort", "array"]}], warnings=["llm_verifier_called_or_fallback"], dataset_key="mixed_dataframe_numpy_bundle"),
         EvalQuestion("list_shapes", "List all tables and arrays with their shapes.", ["table_artifact", {"any_of": ["users", "orders", "daily_metrics", "embedding", "cohort"]}], dataset_key="mixed_dataframe_numpy_bundle"),
         EvalQuestion("join_revenue_country", "Join users and orders on user_id, then show revenue by country as a table and chart.", ["table_artifact", "chart_artifact", "state_changed_false"], dataset_key="mixed_dataframe_numpy_bundle"),
         EvalQuestion("daily_active_users_chart", "Create a line chart of daily active_users over time.", ["chart_artifact", "chart_type_line", "chart_data_valid"], dataset_key="mixed_dataframe_numpy_bundle"),
@@ -1531,25 +1632,25 @@ SUITES: dict[str, list[EvalQuestion]] = {
         EvalQuestion("export_top_users", "Export the top 20 users by total gross_revenue as CSV.", ["csv_artifact", "state_changed_false"], dataset_key="mixed_dataframe_numpy_bundle"),
     ],
     "generated_custom_sensor_fleet": [
-        EvalQuestion("inspect_custom", "What's in this file? Explain the custom class structure.", [{"any_of": ["SensorFleet", "sensor", "readings"]}], dataset_key="custom_sensor_fleet"),
+        EvalQuestion("inspect_custom", "What's in this file? Explain the custom class structure.", [{"any_of": ["SensorFleet", "sensor", "readings"]}], warnings=["llm_verifier_called_or_fallback"], dataset_key="custom_sensor_fleet"),
         EvalQuestion("readings_table", "Convert sensor readings into a table with sensor_id, timestamp, site, zone, temperature_c, vibration_g, battery_pct.", ["table_artifact", {"table_required_columns": ["sensor_id", "timestamp", "site", "zone", "temperature_c", "vibration_g", "battery_pct"]}], dataset_key="custom_sensor_fleet"),
         EvalQuestion("average_temperature_line", "Create a line chart of average temperature by hour.", ["chart_artifact", "chart_type_line", "chart_data_valid"], dataset_key="custom_sensor_fleet"),
-        EvalQuestion("alert_counts_bar", "Create a bar chart of alert counts by alert type.", ["chart_artifact", "chart_type_bar", "chart_data_valid"], dataset_key="custom_sensor_fleet"),
+        EvalQuestion("alert_counts_bar", "Create a bar chart of alert counts by alert type.", ["chart_artifact", "chart_type_bar", "chart_data_valid", "alert_count_chart_fields", "no_generic_dataset_chart"], dataset_key="custom_sensor_fleet"),
         EvalQuestion("high_vibration_table", "Find sensors with high vibration alerts and show a table.", ["table_artifact", {"any_of": ["sensor", "vibration", "alert"]}], dataset_key="custom_sensor_fleet"),
         EvalQuestion("export_alerts", "Export all alerts as CSV with sensor_id, timestamp, alert_type, severity, value.", ["csv_artifact", "state_changed_false"], dataset_key="custom_sensor_fleet"),
-        EvalQuestion("remove_low_battery", "Remove readings with battery_pct below 5, but ask for confirmation first.", ["confirmation_required", "state_not_changed_before_approval"], dataset_key="custom_sensor_fleet"),
+        EvalQuestion("remove_low_battery", "Remove readings with battery_pct below 5, but ask for confirmation first.", ["zero_affected_no_confirmation_or_confirmation_required", "state_not_changed_before_approval"], dataset_key="custom_sensor_fleet"),
     ],
     "generated_mixed_top_level_collection": [
-        EvalQuestion("inspect_mixed", "What's in this file? Explain each top-level element and its type.", [{"any_of": ["mixed", "top-level", "DataFrame", "numpy", "tuple"]}], dataset_key="mixed_top_level_collection"),
+        EvalQuestion("inspect_mixed", "What's in this file? Explain each top-level element and its type.", [{"any_of": ["mixed", "top-level", "DataFrame", "numpy", "tuple"]}], warnings=["llm_verifier_called_or_fallback"], dataset_key="mixed_top_level_collection"),
         EvalQuestion("preview_tabular_elements", "Try to convert each tabular-looking element into a preview table.", ["table_artifact"], dataset_key="mixed_top_level_collection"),
         EvalQuestion("nested_records_fields", "Find all nested records and show their common fields.", [{"any_of": ["record", "field", "payload"]}], dataset_key="mixed_top_level_collection"),
         EvalQuestion("element_type_summary", "Create a summary table of top-level element types.", ["table_artifact", {"table_required_columns": ["element_index", "type"]}], dataset_key="mixed_top_level_collection"),
     ],
     "generated_multi_dataset": [
         EvalQuestion("list_all_datasets", "List all datasets in this session. For each dataset, show object type, row count or length, and representative fields.", ["table_artifact", "state_changed_false"]),
-        EvalQuestion("compare_datasets", "Compare the uploaded datasets by object type, approximate row count or length, schema style, and key fields.", ["table_artifact", {"any_of": ["nested", "NumPy", "custom", "class"]}]),
+        EvalQuestion("compare_datasets", "Compare the uploaded datasets by object type, approximate row count or length, schema style, and key fields.", ["table_artifact", {"any_of": ["nested", "NumPy", "custom", "class"]}], warnings=["llm_verifier_called_or_fallback"]),
         EvalQuestion("identify_join_keys", "Inspect the uploaded datasets and identify possible join keys, if any. Do not join yet.", ["state_changed_false", {"any_of": ["join", "key", "no direct"]}]),
-        EvalQuestion("cross_dataset_chart", "Create a comparison chart showing approximate record counts for each uploaded dataset.", ["table_artifact", "chart_artifact", "chart_type_bar", "chart_data_valid"]),
+        EvalQuestion("cross_dataset_chart", "Create a comparison chart showing approximate record counts for each uploaded dataset.", ["table_artifact", "chart_artifact", "chart_type_bar", "chart_data_valid", "dataset_comparison_chart_fields", "no_generic_dataset_chart"]),
     ],
 }
 

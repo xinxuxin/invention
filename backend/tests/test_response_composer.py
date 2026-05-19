@@ -75,6 +75,37 @@ def test_inspection_type_object_preview_uses_clean_type_name() -> None:
     assert "{'type':" not in answer.markdown
 
 
+def test_dict_structure_summary_uses_top_level_keys_not_records() -> None:
+    result = ExecutionResult(
+        ok=True,
+        stdout="",
+        stderr="",
+        traceback=None,
+        result_preview={
+            "object_type": "dict",
+            "length": 3,
+            "top_level_keys": ["metadata", "customers", "lookup_tables"],
+            "likely_primary_records": [{"path": "customers", "count": 25}],
+            "record_collections_detected": [
+                {"path": "customers", "count": 25},
+                {"path": "customers.events", "count": 120},
+            ],
+        },
+    )
+
+    answer = ResponseComposer().compose(
+        user_message="What's in this file? Explain the structure.",
+        execution_result=result,
+        artifacts=[],
+        verification=_pass(),
+        state_changed=False,
+    )
+
+    assert "Top-level keys observed: 3" in answer.markdown
+    assert "Primary record collection: customers (25 records)" in answer.markdown
+    assert "Records/items observed: 3" not in answer.markdown
+
+
 def test_schema_answer_groups_domain_fields() -> None:
     result = ExecutionResult(
         ok=True,

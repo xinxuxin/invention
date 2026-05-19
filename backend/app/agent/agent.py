@@ -20,7 +20,14 @@ from app.agent.verifier import ResultVerifier, merge_verification_results, verif
 from app.agent.llm_verifier import LLMVerifier
 from app.core.config import get_settings
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
-from app.runtime.python_executor import ExecutionArtifact, ExecutionResult, PythonExecutor, object_to_record, to_dataframe
+from app.runtime.python_executor import (
+    ExecutionArtifact,
+    ExecutionResult,
+    PythonExecutor,
+    flatten_records_at_path,
+    object_to_record,
+    to_dataframe,
+)
 from app.services.versioning import (
     active_branch,
     apply_version_to_dataset,
@@ -379,14 +386,14 @@ class CodingAgent:
             return
 
         if self._runtime_shortcuts_enabled():
-            analysis_shortcut_events = self._analysis_shortcut(session_id, request)
+            analysis_shortcut_events = self._analysis_shortcut(session_id, request, context)
             if analysis_shortcut_events is not None:
                 for event in analysis_shortcut_events:
                     yield event
                 yield {"type": "message_done"}
                 return
 
-            chart_shortcut_events = self._chart_shortcut(session_id, request)
+            chart_shortcut_events = self._chart_shortcut(session_id, request, context)
             if chart_shortcut_events is not None:
                 for event in chart_shortcut_events:
                     yield event
@@ -945,7 +952,109 @@ class CodingAgent:
         ):
             return self._confirm_delete_empty_title(session_id, request)
 
+        if (
+            any(term in lowered for term in ("delete", "remove", "drop"))
+            and "battery_pct" in lowered
+            and any(term in lowered for term in ("below", "under", "less than", "<"))
+        ):
+            threshold_match = re.search(r"(?:below|under|less than|<)\s*(\d+(?:\.\d+)?)", lowered)
+            threshold = float(threshold_match.group(1)) if threshold_match else 5.0
+            return self._confirm_remove_battery_below(session_id, request, threshold)
+
         return None
+
+    def _confirm_remove_battery_below(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+        threshold: float,
+    ) -> list[dict[str, Any]]:
+        dataset = self._active_dataset_for_request(session_id, request.active_dataset_id)
+        if dataset is None:
+            return [{"type": "error", "message": "No active dataset is available for mutation."}]
+        value = load_pickle(Path(dataset.current_snapshot_path))
+        rows = flatten_records_at_path(value, "readings") or flatten_records_at_path(value, "sensors.readings")
+        if not rows:
+            try:
+                frame = to_dataframe(value, limit=None)
+                rows = frame.to_dict("records") if "battery_pct" in frame.columns else []
+            except Exception:
+                rows = []
+        current_count = len(rows)
+        affected_count = sum(1 for row in rows if _numeric_below(row.get("battery_pct"), threshold))
+        if affected_count == 0:
+            threshold_text = f"{threshold:g}"
+            return [
+                {"type": "trace", "message": "Scanned the full dataset for low-battery readings..."},
+                {
+                    "type": "final_answer",
+                    "answer": (
+                        f"I scanned all {current_count:,} discovered readings and found **0** records with "
+                        f"`battery_pct` below {threshold_text}. No mutation was applied.\n\n"
+                        "**State changed:** No"
+                    ),
+                    "state_changed": False,
+                },
+            ]
+
+        code = "\n".join(
+            [
+                f"threshold = {threshold!r}",
+                "def _keep_reading(reading):",
+                "    record = object_to_record(reading)",
+                "    try:",
+                "        value = float(record.get('battery_pct'))",
+                "    except Exception:",
+                "        return True",
+                "    return value >= threshold",
+                "if isinstance(data, pd.DataFrame):",
+                "    values = pd.to_numeric(data.get('battery_pct'), errors='coerce')",
+                "    keep_mask = values.isna() | (values >= threshold)",
+                "    current_count = len(data)",
+                "    affected_count = current_count - int(keep_mask.sum())",
+                "    data = data.loc[keep_mask].copy()",
+                "elif hasattr(data, 'readings'):",
+                "    readings = list(getattr(data, 'readings'))",
+                "    kept = [reading for reading in readings if _keep_reading(reading)]",
+                "    current_count = len(readings)",
+                "    affected_count = current_count - len(kept)",
+                "    setattr(data, 'readings', kept)",
+                "elif isinstance(data, list):",
+                "    current_count = len(data)",
+                "    data = [item for item in data if _keep_reading(item)]",
+                "    affected_count = current_count - len(data)",
+                "else:",
+                "    frame = to_dataframe(data, limit=None)",
+                "    values = pd.to_numeric(frame.get('battery_pct'), errors='coerce')",
+                "    keep_mask = values.isna() | (values >= threshold)",
+                "    current_count = len(frame)",
+                "    affected_count = current_count - int(keep_mask.sum())",
+                "    data = frame.loc[keep_mask].copy()",
+                "RESULT = {'full_scan': True, 'affected_count': affected_count, 'current_row_count': current_count, 'new_row_count': current_count - affected_count}",
+            ]
+        )
+        new_count = max(0, current_count - affected_count)
+        confirmation = self._direct_confirmation(
+            session_id=session_id,
+            request=request,
+            dataset=dataset,
+            code=code,
+            operation_summary=f"Remove readings where `battery_pct` is below {threshold:g}",
+            risk_level="medium",
+            metadata={
+                "operation_kind": "remove_battery_below",
+                "current_row_count": current_count,
+                "new_row_count": new_count,
+                "affected_count": affected_count,
+            },
+        )
+        return [
+            {"type": "trace", "message": "Scanned the full dataset and found low-battery readings."},
+            self._confirmation_event(
+                confirmation,
+                message="Removing low-battery readings changes the active dataset state. Please confirm before I apply it.",
+            ),
+        ]
 
     def _confirm_delete_last_n(
         self,
@@ -1259,6 +1368,7 @@ class CodingAgent:
         self,
         session_id: str,
         request: ChatStreamRequest,
+        context: dict[str, Any],
     ) -> list[dict[str, Any]] | None:
         code = _common_chart_code(request.message)
         if code is None:
@@ -1287,7 +1397,7 @@ class CodingAgent:
                 "updated_datasets": [],
             }
         )
-        verification = self.verifier.verify(
+        deterministic = self.verifier.verify(
             user_message=request.message,
             execution_result=result,
             artifacts_created_this_turn=result.artifacts,
@@ -1297,6 +1407,25 @@ class CodingAgent:
             retries_remaining=False,
             state_changed=False,
             latest_code=code,
+        )
+        llm_verification, llm_trace = self.llm_verifier.verify_if_allowed(
+            user_message=request.message,
+            context=context,
+            execution_result=result,
+            artifacts=result.artifacts,
+            state_changed=False,
+            latest_code=code,
+            deterministic_result=deterministic,
+            current_step=1,
+            turn_started_at=time.monotonic(),
+            calls_this_turn=0,
+        )
+        if llm_trace:
+            events.append({"type": "trace", "message": llm_trace})
+        verification = merge_verification_results(
+            deterministic,
+            llm_verification,
+            min_confidence=get_settings().llm_verifier_min_confidence,
         )
         events.append(
             {
@@ -1343,6 +1472,7 @@ class CodingAgent:
         self,
         session_id: str,
         request: ChatStreamRequest,
+        context: dict[str, Any],
     ) -> list[dict[str, Any]] | None:
         code = _common_table_export_code(request.message)
         if code is None:
@@ -1371,7 +1501,7 @@ class CodingAgent:
                 "updated_datasets": [],
             }
         )
-        verification = self.verifier.verify(
+        deterministic = self.verifier.verify(
             user_message=request.message,
             execution_result=result,
             artifacts_created_this_turn=result.artifacts,
@@ -1381,6 +1511,25 @@ class CodingAgent:
             retries_remaining=False,
             state_changed=False,
             latest_code=code,
+        )
+        llm_verification, llm_trace = self.llm_verifier.verify_if_allowed(
+            user_message=request.message,
+            context=context,
+            execution_result=result,
+            artifacts=result.artifacts,
+            state_changed=False,
+            latest_code=code,
+            deterministic_result=deterministic,
+            current_step=1,
+            turn_started_at=time.monotonic(),
+            calls_this_turn=0,
+        )
+        if llm_trace:
+            events.append({"type": "trace", "message": llm_trace})
+        verification = merge_verification_results(
+            deterministic,
+            llm_verification,
+            min_confidence=get_settings().llm_verifier_min_confidence,
         )
         events.append(
             {
@@ -1823,6 +1972,13 @@ def _scan_empty_title(value: Any) -> tuple[int, int, bool]:
     return current_count, affected_count, True
 
 
+def _numeric_below(value: Any, threshold: float) -> bool:
+    try:
+        return float(value) < threshold
+    except (TypeError, ValueError):
+        return False
+
+
 def _branch_exists(session_id: str, name: str, db: Session) -> bool:
     return (
         db.exec(select(Branch).where(Branch.session_id == session_id).where(Branch.name == name)).first()
@@ -2045,6 +2201,62 @@ def _common_chart_code(message: str) -> str | None:
                 "save_table('Latency vs error rate', rows, description='Underlying data for latency/error scatter chart.')",
                 f"save_chart('{title}', {{'title': '{title}', 'chart_type': 'scatter', 'data': rows, 'x': 'latency_ms_p95', 'y': 'error_rate'}})",
                 "RESULT = {'chart': 'Latency vs Error Rate', 'rows': len(rows)}",
+            ]
+        )
+    if "alert" in prompt and "count" in prompt and ("type" in prompt or "alert type" in prompt):
+        title = "Alert Counts by Type"
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for path in ('alerts', 'readings.alerts', 'sensors.readings.alerts'):",
+                "    rows.extend(flatten_records_at_path(data, path))",
+                "if not rows:",
+                "    for collection in find_record_collections(data, max_depth=5):",
+                "        path = collection.get('path', '')",
+                "        if 'alert' in str(path).lower():",
+                "            rows.extend(flatten_records_at_path(data, path))",
+                "df = pd.DataFrame(rows)",
+                "if df.empty:",
+                "    raise ValueError('Could not find alert records to count by alert type.')",
+                "type_col = next((c for c in df.columns if str(c).lower() in {'alert_type', 'type'} or ('alert' in str(c).lower() and 'type' in str(c).lower())), None)",
+                "if type_col is None:",
+                "    raise ValueError('Could not find an alert_type/type field in discovered alert records.')",
+                "counts = df[type_col].fillna('Unknown').astype(str).value_counts().reset_index()",
+                "counts.columns = ['alert_type', 'alert_count']",
+                "counts.attrs['source_row_count'] = len(df)",
+                "counts.attrs['source_total_row_count'] = len(df)",
+                "counts.attrs['analyzed_row_count'] = len(df)",
+                "chart_rows = counts.to_dict('records')",
+                "save_table('Alert counts by type', counts, description='Alert records counted by alert_type/type.')",
+                f"save_chart('{title}', {{'title': '{title}', 'chart_type': 'bar', 'data': chart_rows, 'x': 'alert_type', 'y': 'alert_count', 'description': 'Alert counts grouped by alert type.'}})",
+                "RESULT = {'chart': 'Alert Counts by Type', 'rows': len(chart_rows), 'alert_records_analyzed': len(df)}",
+            ]
+        )
+    if "dataset" in prompt and "comparison" in prompt and any(marker in prompt for marker in ("record count", "record counts", "approximate record", "counts")):
+        title = "Dataset Record Count Comparison"
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for name, obj in datasets.items():",
+                "    summary = summarize_structure(obj)",
+                "    primary = (summary.get('likely_primary_records') or [{}])[0]",
+                "    count = primary.get('count') or summary.get('length')",
+                "    if count is None and summary.get('tables_detected'):",
+                "        shapes = [item.get('shape') for item in summary.get('tables_detected', []) if isinstance(item, dict)]",
+                "        count = sum(int(shape[0]) for shape in shapes if isinstance(shape, list) and shape)",
+                "    if count is None:",
+                "        try:",
+                "            count = len(obj)",
+                "        except Exception:",
+                "            count = 1",
+                "    rows.append({'dataset_name': name, 'record_count': int(count or 0), 'object_type': summary.get('object_type'), 'primary_record_path': primary.get('path')})",
+                "if len(rows) <= 1:",
+                "    raise ValueError('Dataset comparison chart requires more than one dataset in the session.')",
+                "save_table('Dataset record counts', rows, description='Approximate record counts for each uploaded dataset.')",
+                f"save_chart('{title}', {{'title': '{title}', 'chart_type': 'bar', 'data': rows, 'x': 'dataset_name', 'y': 'record_count', 'description': 'Approximate record count comparison across uploaded datasets.'}})",
+                "RESULT = {'chart': 'Dataset Record Count Comparison', 'dataset_count': len(rows), 'rows': rows}",
             ]
         )
     if "revenue" in prompt and has_country_intent:
@@ -2295,6 +2507,48 @@ def _common_table_export_code(message: str) -> str | None:
                 "export_rows = [{key: row.get(key) for key in columns} for row in rows]",
                 "save_csv('Risk Flags Export', rows=export_rows)",
                 "RESULT = {'csv_created': True, 'row_count': len(export_rows), 'columns': columns, 'state_changed': False}",
+            ]
+        )
+    if "top" in prompt and ("country" in prompt or "countries" in prompt) and "table" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "df = to_dataframe(data, limit=None)",
+                "if 'country' not in df.columns:",
+                "    rows = []",
+                "    for collection in find_record_collections(data, max_depth=5):",
+                "        rows.extend(flatten_records_at_path(data, collection.get('path', '')))",
+                "    df = pd.DataFrame(rows)",
+                "if 'country' not in df.columns:",
+                "    raise ValueError(\"Cannot compute top countries because no 'country' field was found.\")",
+                "counts = df['country'].fillna('Unknown').astype(str).value_counts().head(10).reset_index()",
+                "counts.columns = ['country', 'record_count']",
+                "counts.attrs['source_row_count'] = len(df)",
+                "counts.attrs['source_total_row_count'] = len(df)",
+                "counts.attrs['analyzed_row_count'] = len(df)",
+                "save_table('Top countries by record count', counts, description='Full-dataset top countries by record count.')",
+                "RESULT = {'columns': list(counts.columns), 'rows': counts.to_dict('records'), 'source_row_count': len(df), 'source_total_row_count': len(df), 'analyzed_row_count': len(df), 'state_changed': False}",
+            ]
+        )
+    if "normalize all" in prompt and "purchase" in prompt and "event" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = flatten_records_at_path(data, 'customers.events')",
+                "if not rows:",
+                "    for collection in find_record_collections(data, max_depth=5):",
+                "        path = collection.get('path', '')",
+                "        if 'event' in str(path).lower():",
+                "            rows.extend(flatten_records_at_path(data, path))",
+                "purchase_rows = []",
+                "for row in rows:",
+                "    event_type = str(row.get('event_type') or row.get('type') or '').lower()",
+                "    if event_type == 'purchase' or 'purchase' in event_type or row.get('order_total') is not None:",
+                "        purchase_rows.append(row)",
+                "columns = ['customer_id', 'event_id', 'timestamp', 'channel', 'event_type', 'order_total']",
+                "table_rows = [{key: row.get(key) for key in columns} for row in purchase_rows]",
+                "save_table('Normalized purchase events', table_rows, description='All discovered purchase events normalized from nested records.')",
+                "RESULT = {'columns': columns, 'row_count': len(table_rows), 'total_row_count': len(table_rows), 'source_total_row_count': len(rows), 'state_changed': False}",
             ]
         )
     if "top-level element" in prompt and "type" in prompt:
