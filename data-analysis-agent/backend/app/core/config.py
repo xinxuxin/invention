@@ -10,7 +10,9 @@ class Settings(BaseSettings):
     storage_dir: str = ".data"
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1"
-    backend_cors_origins: list[AnyHttpUrl] = Field(default_factory=lambda: ["http://localhost:5173"])
+    backend_cors_origins: list[AnyHttpUrl] = Field(
+        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
+    )
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

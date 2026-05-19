@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode, new_id, utc_now
 from app.services.introspection import introspect_object
+from app.services.versioning import latest_versions_for_branch, sync_branch_pointer
 from app.storage.files import artifacts_root, load_pickle, save_snapshot
 
 DEFAULT_TIMEOUT_SECONDS = 5
@@ -87,13 +88,14 @@ class PythonExecutor:
         branch_name: str = "main",
         mutates_state: bool = False,
         mutation_summary: str | None = None,
+        created_by_message_id: str | None = None,
     ) -> ExecutionResult:
         analysis_session = self.db.get(AnalysisSession, session_id)
         if analysis_session is None:
             raise ValueError(f"Session not found: {session_id}")
 
-        branch = self._get_branch(session_id, branch_name)
-        loaded = self._load_session_datasets(session_id)
+        branch = self._get_branch(analysis_session, branch_name)
+        loaded = self._load_session_datasets(session_id, branch)
         active = self._resolve_active_dataset(loaded, active_dataset_id)
 
         child_payload = self._run_in_child(code, loaded, active)
@@ -133,6 +135,7 @@ class PythonExecutor:
                 returned_data=child_payload.get("data"),
                 active=active,
                 mutation_summary=mutation_summary or "Python execution mutation",
+                created_by_message_id=created_by_message_id,
             )
 
         return ExecutionResult(
@@ -145,22 +148,31 @@ class PythonExecutor:
             artifacts=artifacts,
         )
 
-    def _get_branch(self, session_id: str, branch_name: str) -> Branch:
-        branch = self.db.exec(
-            select(Branch).where(Branch.session_id == session_id).where(Branch.name == branch_name)
-        ).first()
+    def _get_branch(self, session: AnalysisSession, branch_name: str) -> Branch:
+        branch = None
+        if branch_name == "main" and session.active_branch_id:
+            branch = self.db.get(Branch, session.active_branch_id)
+
+        if branch is None:
+            branch = self.db.exec(
+                select(Branch).where(Branch.session_id == session.id).where(Branch.name == branch_name)
+            ).first()
+
         if branch is None:
             raise ValueError(f"Branch not found: {branch_name}")
 
         return branch
 
-    def _load_session_datasets(self, session_id: str) -> list[LoadedDataset]:
+    def _load_session_datasets(self, session_id: str, branch: Branch) -> list[LoadedDataset]:
         rows = list(self.db.exec(select(Dataset).where(Dataset.session_id == session_id)).all())
         keys = _dataset_keys(rows)
+        branch_versions = latest_versions_for_branch(branch.id, self.db)
 
         loaded: list[LoadedDataset] = []
         for row in rows:
-            value = load_pickle(Path(row.current_snapshot_path))
+            version = branch_versions.get(row.id)
+            snapshot_path = version.snapshot_path if version else row.current_snapshot_path
+            value = load_pickle(Path(snapshot_path))
             loaded.append(
                 LoadedDataset(
                     row=row,
@@ -234,6 +246,7 @@ class PythonExecutor:
         returned_data: Any,
         active: LoadedDataset | None,
         mutation_summary: str,
+        created_by_message_id: str | None,
     ) -> list[UpdatedDataset]:
         updated: list[UpdatedDataset] = []
         values_by_dataset_id: dict[str, tuple[str, Any]] = {}
@@ -267,11 +280,14 @@ class PythonExecutor:
                 id=version_id,
                 dataset_id=dataset.row.id,
                 branch_id=branch.id,
-                parent_id=dataset.row.current_version_id,
+                parent_version_id=branch.current_version_id or dataset.row.current_version_id,
                 label="python execution",
                 snapshot_path=str(snapshot_path),
+                mutation_summary=mutation_summary,
+                created_by_message_id=created_by_message_id,
                 profile=profile,
             )
+            sync_branch_pointer(branch, version)
             dataset.row.current_version_id = version_id
             dataset.row.current_snapshot_path = str(snapshot_path)
             dataset.row.profile = profile
@@ -281,6 +297,7 @@ class PythonExecutor:
             session.updated_at = utc_now()
 
             self.db.add(version)
+            self.db.add(branch)
             self.db.add(dataset.row)
             self.db.add(session)
             updated.append(

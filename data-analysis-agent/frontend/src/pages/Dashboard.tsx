@@ -1,20 +1,20 @@
 import { motion } from "framer-motion";
 import {
   Activity,
-  Clock3,
   Database,
   GitBranch,
+  GitFork,
   Layers3,
   Loader2,
   MessageSquareText,
   PanelRight,
-  Plus,
   Sparkles,
   Upload,
 } from "lucide-react";
 
 import { Button } from "../components/Button";
 import { ArtifactCard } from "../components/ArtifactCard";
+import { BranchTimeline } from "../components/BranchTimeline";
 import { ChatInput } from "../components/ChatInput";
 import { ChatThread } from "../components/ChatThread";
 import { CollapsibleCard } from "../components/CollapsibleCard";
@@ -32,11 +32,11 @@ export function Dashboard() {
   const chat = useChat({
     sessionId: workspace.session?.id,
     activeDatasetId: workspace.activeDataset?.id,
-    branchName: branchName(workspace.session?.branches[0]?.name),
-    onStateChanged: workspace.refreshDatasets,
+    branchName: branchName(workspace.activeBranch?.name),
+    onStateChanged: workspace.refreshWorkspace,
   });
   const isOnline = health.status === "online";
-  const branch = workspace.session?.branches[0] ?? null;
+  const branch = workspace.activeBranch;
 
   return (
     <main className="min-h-screen p-4 text-foreground sm:p-6 lg:p-8">
@@ -76,8 +76,16 @@ export function Dashboard() {
               <Upload className="h-4 w-4" />
               Upload ready
             </Button>
-            <Button disabled>
-              <Plus className="h-4 w-4" />
+            <Button
+              disabled={!workspace.session}
+              onClick={() => {
+                const name = window.prompt("Name this branch", `branch-${(workspace.session?.branches.length ?? 0) + 1}`);
+                if (name) {
+                  void workspace.createBranch(name, workspace.selectedVersion?.id ?? null);
+                }
+              }}
+            >
+              <GitFork className="h-4 w-4" />
               New branch
             </Button>
           </div>
@@ -148,27 +156,17 @@ export function Dashboard() {
                 eyebrow="Active branch"
                 icon={<GitBranch className="h-4 w-4" />}
               >
-                <div className="space-y-3">
-                  <div className="rounded-md border border-teal-200 bg-teal-50 p-3">
-                    <p className="text-xs font-bold text-teal-950">main</p>
-                    <p className="mt-1 text-xs text-teal-900/70">Initial version nodes land here.</p>
-                  </div>
-                  <div className="space-y-2">
-                    {workspace.datasets.length === 0 ? (
-                      <TimelineEmpty />
-                    ) : (
-                      workspace.datasets.slice(0, 4).map((dataset) => (
-                        <div key={dataset.id} className="flex gap-2 text-xs">
-                          <span className="mt-1.5 h-2 w-2 rounded-full bg-teal-600" />
-                          <span className="min-w-0">
-                            <span className="block truncate font-semibold">{dataset.original_filename}</span>
-                            <span className="text-muted-foreground">{dataset.current_version.label}</span>
-                          </span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
+                <BranchTimeline
+                  branches={workspace.session?.branches ?? []}
+                  activeBranchId={workspace.session?.active_branch_id ?? null}
+                  versions={workspace.history}
+                  selectedVersionId={workspace.selectedVersionId}
+                  busyAction={workspace.historyAction}
+                  onSelectVersion={workspace.setSelectedVersionId}
+                  onCheckoutBranch={(branchId) => void workspace.checkoutBranch(branchId)}
+                  onRollbackVersion={(versionId) => void workspace.rollbackVersion(versionId)}
+                  onForkVersion={(versionId, name) => void workspace.forkVersion(versionId, name)}
+                />
               </CollapsibleCard>
             </div>
           </Panel>
@@ -259,6 +257,49 @@ export function Dashboard() {
 
               <ProfileInspector dataset={workspace.activeDataset} />
 
+              {workspace.selectedVersion ? (
+                <CollapsibleCard
+                  title={workspace.selectedVersion.mutation_summary ?? workspace.selectedVersion.label}
+                  eyebrow="Selected version"
+                  icon={<GitBranch className="h-4 w-4" />}
+                  defaultOpen={false}
+                >
+                  <div className="space-y-2 text-xs">
+                    <MiniMetric label="Branch" value={workspace.selectedVersion.branch_name ?? "unknown"} />
+                    <MiniMetric
+                      label="Dataset"
+                      value={workspace.selectedVersion.dataset_filename ?? "unknown"}
+                    />
+                    <p className="break-all rounded-md bg-slate-50 p-2 font-medium text-muted-foreground">
+                      {workspace.selectedVersion.id}
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="h-8 px-2 text-xs"
+                        onClick={() => void workspace.rollbackVersion(workspace.selectedVersion!.id)}
+                      >
+                        Rollback
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="h-8 px-2 text-xs"
+                        onClick={() => {
+                          const name = window.prompt("Name this branch", `branch-${(workspace.session?.branches.length ?? 0) + 1}`);
+                          if (name && workspace.selectedVersion) {
+                            void workspace.forkVersion(workspace.selectedVersion.id, name);
+                          }
+                        }}
+                      >
+                        Fork
+                      </Button>
+                    </div>
+                  </div>
+                </CollapsibleCard>
+              ) : null}
+
               <CollapsibleCard
                 title="Artifacts"
                 eyebrow={`${chat.artifacts.length} generated`}
@@ -329,13 +370,4 @@ function EmptyDatasets() {
 
 function branchName(value?: string) {
   return value ?? "main";
-}
-
-function TimelineEmpty() {
-  return (
-    <div className="flex gap-2 text-xs text-muted-foreground">
-      <Clock3 className="mt-0.5 h-3.5 w-3.5" />
-      <span>Initial version timeline appears after upload.</span>
-    </div>
-  );
 }

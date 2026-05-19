@@ -5,9 +5,10 @@ from sqlmodel import Session, select
 
 from app.db.session import get_session
 from app.models.entities import AnalysisSession, Branch, Dataset, VersionNode, new_id, utc_now
-from app.schemas.dataset import DatasetListResponse, DatasetRead, DatasetUploadResponse, VersionNodeRead
-from app.schemas.session import BranchRead, SessionCreate, SessionRead
+from app.schemas.dataset import DatasetListResponse, DatasetRead, DatasetUploadResponse
+from app.schemas.session import SessionCreate, SessionRead
 from app.services.introspection import introspect_object
+from app.services.versioning import active_branch, branch_read, current_version, dataset_read, sync_branch_pointer
 from app.storage.files import load_pickle, save_snapshot, save_upload
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -17,6 +18,7 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 def create_session(payload: SessionCreate, db: Session = Depends(get_session)) -> SessionRead:
     analysis_session = AnalysisSession(name=payload.name)
     branch = Branch(session_id=analysis_session.id, name="main")
+    analysis_session.active_branch_id = branch.id
 
     db.add(analysis_session)
     db.add(branch)
@@ -33,6 +35,8 @@ def get_analysis_session(session_id: str, db: Session = Depends(get_session)) ->
     if analysis_session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
+    if analysis_session.active_branch_id is None:
+        active_branch(analysis_session, db)
     branches = db.exec(select(Branch).where(Branch.session_id == session_id)).all()
     return _session_read(analysis_session, list(branches))
 
@@ -85,20 +89,23 @@ async def upload_datasets(
             id=version_id,
             dataset_id=dataset_id,
             branch_id=main_branch.id,
-            parent_id=None,
+            parent_version_id=None,
             label="initial",
             snapshot_path=str(snapshot_path),
+            mutation_summary="Initial upload",
             profile=profile,
         )
+        sync_branch_pointer(main_branch, version)
 
         db.add(dataset)
         db.add(version)
+        db.add(main_branch)
         analysis_session.updated_at = utc_now()
         db.add(analysis_session)
         db.commit()
         db.refresh(dataset)
         db.refresh(version)
-        uploaded.append(_dataset_read(dataset, version))
+        uploaded.append(dataset_read(dataset, version))
 
     return DatasetUploadResponse(datasets=uploaded)
 
@@ -110,7 +117,7 @@ def list_datasets(session_id: str, db: Session = Depends(get_session)) -> Datase
 
     datasets = db.exec(select(Dataset).where(Dataset.session_id == session_id)).all()
     return DatasetListResponse(
-        datasets=[_dataset_read(dataset, _current_version(dataset, db)) for dataset in datasets]
+        datasets=[dataset_read(dataset, _current_version(dataset, db)) for dataset in datasets]
     )
 
 
@@ -120,7 +127,7 @@ def get_dataset(session_id: str, dataset_id: str, db: Session = Depends(get_sess
     if dataset is None or dataset.session_id != session_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
 
-    return _dataset_read(dataset, _current_version(dataset, db))
+    return dataset_read(dataset, _current_version(dataset, db))
 
 
 def _validate_pickle_upload(upload: UploadFile) -> None:
@@ -143,48 +150,21 @@ def _get_main_branch(session_id: str, db: Session) -> Branch:
 
 
 def _current_version(dataset: Dataset, db: Session) -> VersionNode:
-    if dataset.current_version_id is None:
+    try:
+        return current_version(dataset, db)
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Dataset has no current version",
-        )
-
-    version = db.get(VersionNode, dataset.current_version_id)
-    if version is None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Current version node missing",
-        )
-
-    return version
+            detail=str(exc),
+        ) from exc
 
 
 def _session_read(analysis_session: AnalysisSession, branches: list[Branch]) -> SessionRead:
     return SessionRead(
         id=analysis_session.id,
         name=analysis_session.name,
+        active_branch_id=analysis_session.active_branch_id,
         created_at=analysis_session.created_at,
         updated_at=analysis_session.updated_at,
-        branches=[BranchRead(id=branch.id, name=branch.name, created_at=branch.created_at) for branch in branches],
-    )
-
-
-def _dataset_read(dataset: Dataset, version: VersionNode) -> DatasetRead:
-    return DatasetRead(
-        id=dataset.id,
-        session_id=dataset.session_id,
-        original_filename=dataset.original_filename,
-        object_type=dataset.object_type,
-        module=dataset.module,
-        profile=dataset.profile,
-        current_version=VersionNodeRead(
-            id=version.id,
-            branch_id=version.branch_id,
-            parent_id=version.parent_id,
-            label=version.label,
-            snapshot_path=version.snapshot_path,
-            created_at=version.created_at,
-        ),
-        created_at=dataset.created_at,
-        updated_at=dataset.updated_at,
+        branches=[branch_read(branch) for branch in branches],
     )

@@ -51,3 +51,19 @@
 - Added POST-SSE frontend chat client, chat state hook, user/assistant message rendering, collapsible trace events, code summaries, prominent final answer cards, confirmation card flow, and inline artifact cards for tables/charts/CSVs.
 - Wired dashboard chat input with Cmd/Ctrl+Enter shortcut, stop button, live trace loading state, active dataset context, mutation refresh, and artifact sidebar.
 - Browser smoke-tested chat send flow: user message renders, public traces stream, and missing `OPENAI_API_KEY` appears as an inline error instead of spinner-only behavior.
+- Started full mutation persistence and branch/fork history phase.
+- Extended SQLModel entities and schemas with session active branch pointers, branch root/current version pointers, and richer `VersionNode` metadata (`parent_version_id`, mutation summary, created-by message).
+- Added SQLite migration guardrails for the new branch/version columns in existing local demo databases.
+- Added versioning service helpers for branch reads, dataset reads, active branch resolution, branch checkout, version application, and branch pointer synchronization.
+- Added branch/history API endpoints for branch listing, branch creation, checkout, rollback, fork, and full timeline retrieval.
+- Updated dataset upload and Python execution mutation persistence so every state-changing operation appends a new version node and updates the active branch state.
+- Updated the agent context with branch and recent history metadata, and added lightweight history handling for rollback, checkout, fork, compare-to-main, and "what changed" requests while keeping the LLM tool set minimal.
+- Added frontend API client types/functions for branch and history operations.
+- Expanded the workspace hook to track active branch, version history, selected version, checkout, rollback, fork, and branch creation.
+- Replaced the branch placeholder with a polished animated branch timeline, selected-version inspector, and rollback/fork/checkout controls in the dashboard.
+- Added default CORS coverage for both `localhost:5173` and `127.0.0.1:5173` after browser smoke testing the Vite dev URL.
+- Browser smoke-tested the dashboard branch timeline: API online, session ready, active `main` badge, selected version panel, dataset cards, and inspector all render.
+- Added backend branch-history regression test covering mutation, rollback, fork, fork mutation, and branch checkout state.
+- Verified backend tests pass: `22 passed`.
+- Verified backend lint passes: `ruff check .`.
+- Verified frontend build passes: `npm run build`.

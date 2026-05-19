@@ -25,6 +25,12 @@ make dev
 - `POST /api/sessions/{session_id}/datasets` uploads one or more `.pkl` files, stores originals and initial snapshots, creates initial version nodes, and returns generic object profiles.
 - `GET /api/sessions/{session_id}/datasets` lists datasets in a session.
 - `GET /api/sessions/{session_id}/datasets/{dataset_id}` returns one dataset profile and current version metadata.
+- `GET /api/sessions/{session_id}/branches` lists branch pointers and the active branch.
+- `POST /api/sessions/{session_id}/branches` creates a branch from the active or requested version.
+- `POST /api/sessions/{session_id}/branches/{branch_id}/checkout` switches the session to a branch snapshot state.
+- `POST /api/sessions/{session_id}/versions/{version_id}/rollback` restores a version by creating a new rollback node.
+- `POST /api/sessions/{session_id}/versions/{version_id}/fork` creates and checks out a new branch from a version.
+- `GET /api/sessions/{session_id}/history` returns the branch/version timeline.
 - `POST /api/sessions/{session_id}/chat/stream` streams general-purpose coding agent events over Server-Sent Events.
 
 ## Python Execution Runtime
@@ -47,6 +53,16 @@ available artifacts. It streams public trace events only, executes Python throug
 observes results, retries failed Python attempts up to three times, requests confirmation before
 destructive mutations, and emits final answers separately from trace events.
 
+The agent prompt receives recent branch/history context, and the backend handles clear history
+requests such as rollback, checkout, fork, compare-to-main, and "what changed" without adding fixed
+analytics tools.
+
+## Branching and Versions
+
+Every dataset upload starts with an initial `VersionNode` on `main`. Every Python execution marked
+as state-changing writes a new snapshot and updates the active branch pointer. Rollback and fork
+operations also create new version nodes so history remains append-only.
+
 ## Security Note
 
 Loading arbitrary pickle files is unsafe in production because pickle payloads can execute code during deserialization. This take-home assumes trusted demo files. A production implementation should move pickle loading into an isolated worker or sandbox with strict resource limits.
@@ -55,6 +71,5 @@ The Python executor is not a secure sandbox. It runs in a child process with tim
 
 ## Planned Areas
 
-- SQLModel persistence with SQLite
-- General-purpose coding agent abstraction over the OpenAI API
-- Frontend chat integration for streamed agent traces
+- Deeper visual diffing between arbitrary branch states
+- More granular confirmation UX for multi-dataset mutations

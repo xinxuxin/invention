@@ -6,12 +6,15 @@ export type HealthResponse = {
 export type Branch = {
   id: string;
   name: string;
+  current_version_id: string | null;
+  root_version_id: string | null;
   created_at: string;
 };
 
 export type AnalysisSession = {
   id: string;
   name: string | null;
+  active_branch_id: string | null;
   created_at: string;
   updated_at: string;
   branches: Branch[];
@@ -20,9 +23,11 @@ export type AnalysisSession = {
 export type VersionNode = {
   id: string;
   branch_id: string;
-  parent_id: string | null;
+  parent_version_id: string | null;
   label: string;
   snapshot_path: string;
+  mutation_summary: string | null;
+  created_by_message_id: string | null;
   created_at: string;
 };
 
@@ -65,6 +70,42 @@ export type DatasetListResponse = {
 
 export type DatasetUploadResponse = {
   datasets: Dataset[];
+};
+
+export type BranchListResponse = {
+  branches: Branch[];
+  active_branch_id: string | null;
+};
+
+export type BranchActionResponse = {
+  branch: Branch;
+  datasets: Dataset[];
+};
+
+export type VersionActionResponse = {
+  branch: Branch;
+  dataset: Dataset;
+  version: VersionNode;
+};
+
+export type HistoryVersion = {
+  id: string;
+  dataset_id: string;
+  dataset_filename: string | null;
+  branch_id: string;
+  branch_name: string | null;
+  parent_version_id: string | null;
+  mutation_summary: string | null;
+  created_by_message_id: string | null;
+  label: string;
+  profile: ObjectProfile;
+  created_at: string;
+  is_current: boolean;
+};
+
+export type HistoryResponse = {
+  active_branch_id: string | null;
+  versions: HistoryVersion[];
 };
 
 export type ChatHistoryMessage = {

@@ -1,11 +1,15 @@
 import type {
   AnalysisSession,
+  BranchActionResponse,
+  BranchListResponse,
   ChatStreamEvent,
   ChatStreamRequest,
   DatasetListResponse,
   DatasetUploadResponse,
   ExecutionArtifact,
   HealthResponse,
+  HistoryResponse,
+  VersionActionResponse,
 } from "../types/api";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
@@ -34,6 +38,55 @@ export async function getSession(sessionId: string): Promise<AnalysisSession> {
 
 export async function listDatasets(sessionId: string): Promise<DatasetListResponse> {
   return request<DatasetListResponse>(`/api/sessions/${sessionId}/datasets`);
+}
+
+export async function listBranches(sessionId: string): Promise<BranchListResponse> {
+  return request<BranchListResponse>(`/api/sessions/${sessionId}/branches`);
+}
+
+export async function createBranch(
+  sessionId: string,
+  payload: { name: string; from_version_id?: string | null },
+): Promise<BranchActionResponse> {
+  return request<BranchActionResponse>(`/api/sessions/${sessionId}/branches`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function checkoutBranch(
+  sessionId: string,
+  branchId: string,
+): Promise<BranchActionResponse> {
+  return request<BranchActionResponse>(`/api/sessions/${sessionId}/branches/${branchId}/checkout`, {
+    method: "POST",
+  });
+}
+
+export async function rollbackVersion(
+  sessionId: string,
+  versionId: string,
+): Promise<VersionActionResponse> {
+  return request<VersionActionResponse>(`/api/sessions/${sessionId}/versions/${versionId}/rollback`, {
+    method: "POST",
+  });
+}
+
+export async function forkVersion(
+  sessionId: string,
+  versionId: string,
+  payload: { name: string },
+): Promise<BranchActionResponse> {
+  return request<BranchActionResponse>(`/api/sessions/${sessionId}/versions/${versionId}/fork`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getHistory(sessionId: string): Promise<HistoryResponse> {
+  return request<HistoryResponse>(`/api/sessions/${sessionId}/history`);
 }
 
 export function uploadDatasets(

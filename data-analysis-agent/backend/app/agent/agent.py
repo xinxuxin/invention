@@ -12,8 +12,15 @@ from sqlmodel import Session, select
 from app.agent.prompts import SYSTEM_PROMPT, build_context_prompt
 from app.agent.tools import AGENT_TOOLS, AgentToolRunner, looks_destructive, parse_tool_arguments
 from app.core.config import get_settings
-from app.models.entities import Artifact, Branch, Dataset, VersionNode
+from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode, new_id, utc_now
 from app.runtime.python_executor import PythonExecutor
+from app.services.versioning import (
+    active_branch,
+    apply_version_to_dataset,
+    checkout_branch,
+    latest_versions_for_branch,
+    sync_branch_pointer,
+)
 
 MAX_AGENT_STEPS = 8
 MAX_EXECUTION_ATTEMPTS = 3
@@ -139,6 +146,13 @@ class CodingAgent:
             yield {"type": "trace", "message": "Inspecting the active dataset structure..."}
         else:
             yield {"type": "trace", "message": "No datasets are uploaded yet; preparing a direct response..."}
+
+        shortcut_events = self._history_shortcut(session_id, request)
+        if shortcut_events is not None:
+            for event in shortcut_events:
+                yield event
+            yield {"type": "message_done"}
+            return
 
         input_items = self._initial_input_items(context, request)
         tool_runner = AgentToolRunner(
@@ -309,11 +323,17 @@ class CodingAgent:
         branch_name: str,
         history: Sequence[ChatHistoryMessage],
     ) -> dict[str, Any]:
-        branch = self.db.exec(
-            select(Branch).where(Branch.session_id == session_id).where(Branch.name == branch_name)
-        ).first()
-        if branch is None:
-            raise ValueError(f"Branch not found: {branch_name}")
+        session = self.db.get(AnalysisSession, session_id)
+        if session is None:
+            raise ValueError(f"Session not found: {session_id}")
+        if branch_name == "main" and session.active_branch_id:
+            branch = active_branch(session, self.db)
+        else:
+            branch = self.db.exec(
+                select(Branch).where(Branch.session_id == session_id).where(Branch.name == branch_name)
+            ).first()
+            if branch is None:
+                raise ValueError(f"Branch not found: {branch_name}")
 
         datasets = list(self.db.exec(select(Dataset).where(Dataset.session_id == session_id)).all())
         active_dataset = _active_dataset(datasets, active_dataset_id)
@@ -325,10 +345,27 @@ class CodingAgent:
         )
         version_by_id = {version.id: version for version in versions}
         artifacts = list(self.db.exec(select(Artifact).where(Artifact.session_id == session_id)).all())
+        branches = list(self.db.exec(select(Branch).where(Branch.session_id == session_id)).all())
+        versions = list(
+            self.db.exec(
+                select(VersionNode)
+                .where(VersionNode.dataset_id.in_([dataset.id for dataset in datasets]))
+                .order_by(VersionNode.created_at)
+            ).all()
+        ) if datasets else []
 
         return {
             "session_id": session_id,
             "active_branch": {"id": branch.id, "name": branch.name},
+            "branches": [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "current_version_id": item.current_version_id,
+                    "root_version_id": item.root_version_id,
+                }
+                for item in branches
+            ],
             "active_dataset_id": active_dataset.id if active_dataset else None,
             "datasets": [
                 {
@@ -340,6 +377,18 @@ class CodingAgent:
                     "current_version": _version_summary(version_by_id.get(dataset.current_version_id)),
                 }
                 for dataset in datasets
+            ],
+            "history": [
+                {
+                    "id": version.id,
+                    "dataset_id": version.dataset_id,
+                    "branch_id": version.branch_id,
+                    "parent_version_id": version.parent_version_id,
+                    "label": version.label,
+                    "mutation_summary": version.mutation_summary,
+                    "created_at": version.created_at.isoformat(),
+                }
+                for version in versions[-20:]
             ],
             "artifacts": [
                 {
@@ -353,6 +402,220 @@ class CodingAgent:
             ],
             "conversation_history_count": len(history),
         }
+
+    def _history_shortcut(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+    ) -> list[dict[str, Any]] | None:
+        message = request.message.lower()
+        if not any(
+            phrase in message
+            for phrase in (
+                "rollback",
+                "roll back",
+                "go back",
+                "switch branch",
+                "checkout",
+                "check out",
+                "fork",
+                "create a branch",
+                "compare this branch",
+                "what changed",
+            )
+        ):
+            return None
+
+        session = self.db.get(AnalysisSession, session_id)
+        if session is None:
+            return [{"type": "error", "message": f"Session not found: {session_id}"}]
+
+        try:
+            branch = active_branch(session, self.db)
+        except Exception as exc:
+            return [{"type": "error", "message": str(exc)}]
+
+        if "compare this branch" in message and "main" in message:
+            return self._compare_branch_to_main(session_id, branch)
+
+        if "what changed" in message:
+            return self._describe_last_change(branch)
+
+        target_branch = _branch_named_in_message(
+            message,
+            list(self.db.exec(select(Branch).where(Branch.session_id == session_id)).all()),
+        )
+        if target_branch and any(phrase in message for phrase in ("switch", "checkout", "check out")):
+            datasets = list(self.db.exec(select(Dataset).where(Dataset.session_id == session_id)).all())
+            checkout_branch(session, target_branch, datasets, self.db)
+            return [
+                {"type": "trace", "message": f"Checking out branch '{target_branch.name}'..."},
+                {
+                    "type": "final_answer",
+                    "answer": f"Checked out branch '{target_branch.name}'. Future analysis will use that branch state.",
+                    "state_changed": True,
+                },
+            ]
+
+        if "fork" in message or "create a branch" in message:
+            source = self._version_for_fork_request(branch, message)
+            if source is None:
+                return [{"type": "error", "message": "I could not find a version to fork from."}]
+            name = _branch_name_from_message(request.message) or f"branch-{new_id()[:6]}"
+            if _branch_exists(session_id, name, self.db):
+                name = f"{name}-{new_id()[:4]}"
+            new_branch = Branch(session_id=session_id, name=name)
+            self.db.add(new_branch)
+            self.db.commit()
+            self.db.refresh(new_branch)
+            forked = self._copy_version(
+                source=source,
+                branch=new_branch,
+                parent_version_id=None,
+                mutation_summary=f"Forked from: {source.mutation_summary or source.label}",
+            )
+            new_branch.root_version_id = forked.id
+            new_branch.current_version_id = forked.id
+            session.active_branch_id = new_branch.id
+            session.updated_at = utc_now()
+            dataset = self.db.get(Dataset, forked.dataset_id)
+            if dataset is not None:
+                apply_version_to_dataset(dataset, forked)
+                self.db.add(dataset)
+            self.db.add(new_branch)
+            self.db.add(session)
+            self.db.commit()
+            return [
+                {"type": "trace", "message": f"Forking version {source.id[:8]} into branch '{name}'..."},
+                {
+                    "type": "final_answer",
+                    "answer": f"Created and checked out branch '{name}' from the requested version.",
+                    "state_changed": True,
+                },
+            ]
+
+        if "rollback" in message or "roll back" in message or "go back" in message:
+            target = self._version_for_rollback_request(branch, message)
+            if target is None:
+                return [{"type": "error", "message": "There is no earlier version to roll back to."}]
+            current = self.db.get(VersionNode, branch.current_version_id) if branch.current_version_id else None
+            rollback = self._copy_version(
+                source=target,
+                branch=branch,
+                parent_version_id=current.id if current else None,
+                mutation_summary=f"Rollback to: {target.mutation_summary or target.label}",
+            )
+            dataset = self.db.get(Dataset, rollback.dataset_id)
+            if dataset is None:
+                return [{"type": "error", "message": "Rollback target dataset is missing."}]
+            apply_version_to_dataset(dataset, rollback)
+            sync_branch_pointer(branch, rollback)
+            session.active_branch_id = branch.id
+            session.updated_at = utc_now()
+            self.db.add(dataset)
+            self.db.add(branch)
+            self.db.add(session)
+            self.db.commit()
+            return [
+                {"type": "trace", "message": "Restoring the requested version as a new history node..."},
+                {
+                    "type": "final_answer",
+                    "answer": f"Rolled back to '{target.mutation_summary or target.label}' on branch '{branch.name}'.",
+                    "state_changed": True,
+                },
+            ]
+
+        return None
+
+    def _version_for_rollback_request(self, branch: Branch, message: str) -> VersionNode | None:
+        current = self.db.get(VersionNode, branch.current_version_id) if branch.current_version_id else None
+        if current is None:
+            return None
+        if "original" in message:
+            return self.db.get(VersionNode, branch.root_version_id) if branch.root_version_id else current
+        if "one step" in message or "previous" in message or "last" in message:
+            return self.db.get(VersionNode, current.parent_version_id) if current.parent_version_id else None
+        return current
+
+    def _version_for_fork_request(self, branch: Branch, message: str) -> VersionNode | None:
+        current = self.db.get(VersionNode, branch.current_version_id) if branch.current_version_id else None
+        versions = list(
+            self.db.exec(
+                select(VersionNode).where(VersionNode.branch_id == branch.id).order_by(VersionNode.created_at)
+            ).all()
+        )
+        if "before" not in message:
+            return current
+        terms = [term for term in ("null", "drop", "filter", "keep", "remove") if term in message]
+        for version in versions:
+            summary = (version.mutation_summary or version.label).lower()
+            if any(term in summary for term in terms):
+                return self.db.get(VersionNode, version.parent_version_id) if version.parent_version_id else version
+        return current
+
+    def _compare_branch_to_main(self, session_id: str, branch: Branch) -> list[dict[str, Any]]:
+        main = self.db.exec(
+            select(Branch).where(Branch.session_id == session_id).where(Branch.name == "main")
+        ).first()
+        if main is None:
+            return [{"type": "error", "message": "Main branch is missing."}]
+        branch_versions = latest_versions_for_branch(branch.id, self.db)
+        main_versions = latest_versions_for_branch(main.id, self.db)
+        lines: list[str] = []
+        datasets = list(self.db.exec(select(Dataset).where(Dataset.session_id == session_id)).all())
+        for dataset in datasets:
+            left = branch_versions.get(dataset.id)
+            right = main_versions.get(dataset.id)
+            left_shape = left.profile.get("shape") if left else None
+            right_shape = right.profile.get("shape") if right else None
+            lines.append(
+                f"{dataset.original_filename}: {branch.name} shape {left_shape}; main shape {right_shape}."
+            )
+        answer = "\n".join(lines) if lines else "There are no datasets to compare yet."
+        return [
+            {"type": "trace", "message": f"Comparing branch '{branch.name}' to main..."},
+            {"type": "final_answer", "answer": answer, "state_changed": False},
+        ]
+
+    def _describe_last_change(self, branch: Branch) -> list[dict[str, Any]]:
+        current = self.db.get(VersionNode, branch.current_version_id) if branch.current_version_id else None
+        if current is None:
+            return [{"type": "final_answer", "answer": "There is no version history yet.", "state_changed": False}]
+        parent = self.db.get(VersionNode, current.parent_version_id) if current.parent_version_id else None
+        if parent is None:
+            answer = f"The current version is the root version: {current.mutation_summary or current.label}."
+        else:
+            answer = (
+                f"Last mutation: {current.mutation_summary or current.label}. "
+                f"Previous version: {parent.mutation_summary or parent.label}."
+            )
+        return [
+            {"type": "trace", "message": "Reading the latest version transition..."},
+            {"type": "final_answer", "answer": answer, "state_changed": False},
+        ]
+
+    def _copy_version(
+        self,
+        *,
+        source: VersionNode,
+        branch: Branch,
+        parent_version_id: str | None,
+        mutation_summary: str,
+    ) -> VersionNode:
+        version = VersionNode(
+            id=new_id(),
+            dataset_id=source.dataset_id,
+            branch_id=branch.id,
+            parent_version_id=parent_version_id,
+            label="branch",
+            snapshot_path=source.snapshot_path,
+            mutation_summary=mutation_summary,
+            profile=source.profile,
+        )
+        self.db.add(version)
+        self.db.commit()
+        self.db.refresh(version)
+        return version
 
 
 def _active_dataset(datasets: Sequence[Dataset], active_dataset_id: str | None) -> Dataset | None:
@@ -369,9 +632,44 @@ def _version_summary(version: VersionNode | None) -> dict[str, Any] | None:
     return {
         "id": version.id,
         "label": version.label,
-        "parent_id": version.parent_id,
+        "parent_version_id": version.parent_version_id,
+        "mutation_summary": version.mutation_summary,
+        "created_by_message_id": version.created_by_message_id,
         "created_at": version.created_at.isoformat(),
     }
+
+
+def _branch_named_in_message(message: str, branches: Sequence[Branch]) -> Branch | None:
+    for branch in branches:
+        if branch.name.lower() in message:
+            return branch
+    return None
+
+
+def _branch_name_from_message(message: str) -> str | None:
+    words = message.replace("'", " ").replace('"', " ").split()
+    for marker in ("called", "named"):
+        if marker in [word.lower() for word in words]:
+            index = [word.lower() for word in words].index(marker)
+            if index + 1 < len(words):
+                return _clean_branch_name(words[index + 1])
+    if "branch" in [word.lower() for word in words]:
+        index = [word.lower() for word in words].index("branch")
+        if index + 1 < len(words) and words[index + 1].lower() not in {"where", "from", "that"}:
+            return _clean_branch_name(words[index + 1])
+    return None
+
+
+def _clean_branch_name(value: str) -> str:
+    cleaned = "".join(character for character in value.strip() if character.isalnum() or character in {"-", "_"})
+    return cleaned[:80] or f"branch-{new_id()[:6]}"
+
+
+def _branch_exists(session_id: str, name: str, db: Session) -> bool:
+    return (
+        db.exec(select(Branch).where(Branch.session_id == session_id).where(Branch.name == name)).first()
+        is not None
+    )
 
 
 def _short_traceback(value: str | None) -> str | None:

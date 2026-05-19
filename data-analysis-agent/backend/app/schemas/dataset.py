@@ -7,9 +7,11 @@ from pydantic import BaseModel
 class VersionNodeRead(BaseModel):
     id: str
     branch_id: str
-    parent_id: str | None
+    parent_version_id: str | None
     label: str
     snapshot_path: str
+    mutation_summary: str | None
+    created_by_message_id: str | None
     created_at: datetime
 
 

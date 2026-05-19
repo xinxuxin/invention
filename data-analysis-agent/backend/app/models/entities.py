@@ -20,6 +20,7 @@ class AnalysisSession(SQLModel, table=True):
 
     id: str = Field(default_factory=new_id, primary_key=True)
     name: str | None = None
+    active_branch_id: str | None = Field(default=None, foreign_key="branches.id")
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
     updated_at: datetime = Field(default_factory=utc_now, nullable=False)
 
@@ -30,6 +31,8 @@ class Branch(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True)
     session_id: str = Field(foreign_key="analysis_sessions.id", index=True)
     name: str = Field(index=True)
+    current_version_id: str | None = Field(default=None, foreign_key="version_nodes.id")
+    root_version_id: str | None = Field(default=None, foreign_key="version_nodes.id")
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
 
 
@@ -55,9 +58,11 @@ class VersionNode(SQLModel, table=True):
     id: str = Field(default_factory=new_id, primary_key=True)
     dataset_id: str = Field(foreign_key="datasets.id", index=True)
     branch_id: str = Field(foreign_key="branches.id", index=True)
-    parent_id: str | None = Field(default=None, foreign_key="version_nodes.id")
-    label: str
+    parent_version_id: str | None = Field(default=None, foreign_key="version_nodes.id")
+    label: str = "mutation"
     snapshot_path: str
+    mutation_summary: str | None = None
+    created_by_message_id: str | None = None
     profile: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
 

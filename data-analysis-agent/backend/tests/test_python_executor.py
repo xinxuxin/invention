@@ -218,11 +218,15 @@ def _create_dataset(
         id=version_id,
         dataset_id=dataset_id,
         branch_id=branch.id,
-        parent_id=None,
+        parent_version_id=None,
         label="initial",
+        mutation_summary="Initial upload",
         snapshot_path=str(snapshot_path),
         profile=profile,
     )
+    branch.root_version_id = version_id
+    branch.current_version_id = version_id
+    analysis_session.active_branch_id = branch.id
 
     db_session.add(analysis_session)
     db_session.add(branch)
