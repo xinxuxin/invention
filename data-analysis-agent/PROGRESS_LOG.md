@@ -149,3 +149,6 @@
 - Added browser confirmation for direct branch-timeline rollback controls so UI-triggered dangerous state changes also pause before applying.
 - Improved frontend API error parsing so FastAPI structured validation details are shown instead of generic status-only messages.
 - Verified clean local startup smoke: backend `GET /health` and Vite frontend HTML responded on `127.0.0.1`.
+- Switched local backend to real OpenAI mode using the user-provided key only as an ephemeral process environment variable; confirmed the key is not present in project files.
+- Fixed read-only executor performance for large datasets by returning full child-process dataset state only when `mutates_state=True`.
+- Verified real OpenAI chat against the uploaded SoftBank pickle returns streamed trace/code results/final answer without timeout.

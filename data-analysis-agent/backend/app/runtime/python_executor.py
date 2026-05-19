@@ -102,7 +102,7 @@ class PythonExecutor:
         loaded = self._load_session_datasets(session_id, branch)
         active = self._resolve_active_dataset(loaded, active_dataset_id or analysis_session.active_dataset_id)
 
-        child_payload = self._run_in_child(code, loaded, active)
+        child_payload = self._run_in_child(code, loaded, active, return_state=mutates_state)
         if child_payload.get("timed_out"):
             return ExecutionResult(
                 ok=False,
@@ -210,6 +210,7 @@ class PythonExecutor:
         code: str,
         loaded: list[LoadedDataset],
         active: LoadedDataset | None,
+        return_state: bool,
     ) -> dict[str, Any]:
         context = _mp_context()
         queue: mp.Queue[bytes] = context.Queue()
@@ -218,7 +219,15 @@ class PythonExecutor:
 
         process = context.Process(
             target=_child_execute,
-            args=(queue, code, datasets, active_key, self.max_stdout_length, self.max_preview_length),
+            args=(
+                queue,
+                code,
+                datasets,
+                active_key,
+                self.max_stdout_length,
+                self.max_preview_length,
+                return_state,
+            ),
         )
         process.start()
         process.join(self.timeout_seconds)
@@ -364,6 +373,7 @@ def _child_execute(
     active_key: str | None,
     max_stdout_length: int,
     max_preview_length: int,
+    return_state: bool,
 ) -> None:
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -407,8 +417,8 @@ def _child_execute(
             "stderr": _truncate_text(stderr.getvalue(), max_stdout_length),
             "traceback": None,
             "result_preview": _limit_preview(_preview(preview_value), max_preview_length),
-            "datasets": namespace["datasets"],
-            "data": data,
+            "datasets": namespace["datasets"] if return_state else {},
+            "data": data if return_state else None,
             "artifacts": artifacts,
         }
     except Exception:
@@ -418,8 +428,8 @@ def _child_execute(
             "stderr": _truncate_text(stderr.getvalue(), max_stdout_length),
             "traceback": traceback_module.format_exc(),
             "result_preview": _limit_preview(_preview(preview_value), max_preview_length),
-            "datasets": datasets,
-            "data": data,
+            "datasets": datasets if return_state else {},
+            "data": data if return_state else None,
             "artifacts": artifacts,
         }
 
