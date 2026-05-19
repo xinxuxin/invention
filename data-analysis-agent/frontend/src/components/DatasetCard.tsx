@@ -43,17 +43,19 @@ export function DatasetCard({ dataset, active, onSelect }: DatasetCardProps) {
           )}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="flex items-center justify-between gap-2">
-            <span className="truncate text-sm font-bold">{dataset.original_filename}</span>
+          <span className="flex min-w-0 items-start justify-between gap-2">
+            <span className="min-w-0 truncate text-sm font-bold">{dataset.original_filename}</span>
             {active ? (
-              <span className="rounded-full bg-teal-700 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
+              <span className="shrink-0 rounded-full bg-teal-700 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
                 Active
               </span>
             ) : null}
           </span>
-          <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>{dataset.object_type}</span>
-            <span className="font-mono text-[11px] text-slate-500">{dataset.dataset_key}</span>
+          <span className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span className="shrink-0">{dataset.object_type}</span>
+            <span className="min-w-0 max-w-full break-all rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] leading-4 text-slate-500">
+              {dataset.dataset_key}
+            </span>
             {metric ? <span className="font-semibold text-slate-700">{metric}</span> : null}
           </span>
           {previewItems.length > 0 ? (

@@ -67,6 +67,32 @@ def test_read_only_execution_does_not_create_version(db_session: Session) -> Non
     assert len(versions) == 1
 
 
+def test_executor_allows_generic_object_introspection_builtins(db_session: Session) -> None:
+    class DemoObject:
+        def __init__(self) -> None:
+            self.alpha = 7
+
+    session_id, dataset_id = _create_dataset(db_session, filename="custom.pkl", value=DemoObject())
+    executor = PythonExecutor(db_session)
+
+    result = executor.execute(
+        session_id,
+        "\n".join(
+            [
+                "print('alpha' in dir(data))",
+                "print(vars(data)['alpha'])",
+                "print(callable(data))",
+                "preview({'public': [name for name in dir(data) if not name.startswith('_')]})",
+            ]
+        ),
+        active_dataset_id=dataset_id,
+    )
+
+    assert result.ok is True
+    assert result.stdout.splitlines() == ["True", "7", "False"]
+    assert result.result_preview is not None
+
+
 def test_mutating_execution_creates_new_version(db_session: Session) -> None:
     session_id, dataset_id = _create_dataset(db_session)
     executor = PythonExecutor(db_session)
@@ -268,7 +294,7 @@ def _create_dataset(
     db_session: Session,
     *,
     filename: str = "dataset.pkl",
-    value: pd.DataFrame | None = None,
+    value: object | None = None,
 ) -> tuple[str, str]:
     frame = value if value is not None else pd.DataFrame({"value": [1, 2, 3], "group": ["a", "b", "a"]})
     analysis_session = AnalysisSession(name="Runtime test")

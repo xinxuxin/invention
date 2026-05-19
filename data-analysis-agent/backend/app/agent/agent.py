@@ -13,7 +13,7 @@ from app.agent.prompts import SYSTEM_PROMPT, build_context_prompt
 from app.agent.tools import AGENT_TOOLS, AgentToolRunner, looks_destructive, parse_tool_arguments, risk_level_for_code
 from app.core.config import get_settings
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
-from app.runtime.python_executor import PythonExecutor
+from app.runtime.python_executor import ExecutionResult, PythonExecutor
 from app.services.versioning import (
     active_branch,
     apply_version_to_dataset,
@@ -278,6 +278,8 @@ class CodingAgent:
         )
         failed_execution_attempts = 0
         state_changed = False
+        last_execution_result: ExecutionResult | None = None
+        informative_execution_result: ExecutionResult | None = None
 
         for _ in range(MAX_AGENT_STEPS):
             try:
@@ -298,8 +300,13 @@ class CodingAgent:
                     if tool_call.name == "execute_python":
                         if failed_execution_attempts >= MAX_EXECUTION_ATTEMPTS:
                             yield {
-                                "type": "error",
-                                "message": "Maximum Python retry attempts reached.",
+                                "type": "trace",
+                                "message": "Python kept failing; preparing the clearest answer from the last traceback...",
+                            }
+                            yield {
+                                "type": "final_answer",
+                                "answer": _fallback_answer_from_execution(last_execution_result),
+                                "state_changed": state_changed,
                             }
                             yield {"type": "message_done"}
                             return
@@ -343,6 +350,9 @@ class CodingAgent:
                         if result is None:
                             continue
 
+                        last_execution_result = result
+                        if _execution_has_user_value(result) or informative_execution_result is None:
+                            informative_execution_result = result
                         state_changed = state_changed or bool(result.updated_datasets)
                         for artifact in result.artifacts:
                             yield {
@@ -364,6 +374,8 @@ class CodingAgent:
 
                         if not result.ok:
                             failed_execution_attempts += 1
+                        else:
+                            failed_execution_attempts = 0
 
                         if not result.ok and failed_execution_attempts < MAX_EXECUTION_ATTEMPTS:
                             yield {
@@ -375,6 +387,13 @@ class CodingAgent:
                                 "type": "trace",
                                 "message": "The Python attempts failed; preparing a concise explanation...",
                             }
+                            yield {
+                                "type": "final_answer",
+                                "answer": _fallback_answer_from_execution(result),
+                                "state_changed": state_changed,
+                            }
+                            yield {"type": "message_done"}
+                            return
 
                         input_items.append(
                             {
@@ -452,7 +471,18 @@ class CodingAgent:
             yield {"type": "message_done"}
             return
 
-        yield {"type": "error", "message": "Agent stopped after reaching the step limit."}
+        yield {
+            "type": "trace",
+            "message": "The agent reached its internal step budget; summarizing the latest execution instead...",
+        }
+        yield {
+            "type": "final_answer",
+            "answer": _fallback_answer_from_execution(
+                informative_execution_result or last_execution_result,
+                step_limited=True,
+            ),
+            "state_changed": state_changed,
+        }
         yield {"type": "message_done"}
 
     def _create_pending_confirmation(
@@ -922,6 +952,78 @@ def _short_traceback(value: str | None) -> str | None:
         return None
     lines = value.strip().splitlines()
     return "\n".join(lines[-8:])
+
+
+def _fallback_answer_from_execution(
+    result: ExecutionResult | None,
+    *,
+    step_limited: bool = False,
+) -> str:
+    if result is None:
+        if step_limited:
+            return (
+                "I reached the internal step budget before a Python result was available. "
+                "No state changes were saved."
+            )
+        return "I could not complete the Python execution. No state changes were saved."
+
+    if not result.ok:
+        error_text = result.stderr or _short_traceback(result.traceback) or "Unknown Python execution error."
+        return (
+            "I could not complete the Python analysis after retrying. "
+            "The latest Python error was:\n\n"
+            f"{_truncate_for_answer(error_text)}\n\n"
+            "No new mutation was saved unless a previous step explicitly reported a saved version."
+        )
+
+    parts = [
+        (
+            "The agent reached its internal step budget before producing a polished final response. "
+            "Here is the most useful execution result available."
+        )
+        if step_limited
+        else "The latest Python execution completed successfully."
+    ]
+    if result.stdout:
+        parts.append(f"Latest output:\n{_truncate_for_answer(result.stdout)}")
+    if result.result_preview is not None:
+        parts.append(f"Latest preview:\n{_truncate_for_answer(_json_preview(result.result_preview))}")
+    if result.artifacts:
+        parts.append(
+            f"Created {len(result.artifacts)} artifact{'s' if len(result.artifacts) != 1 else ''}."
+        )
+    if result.updated_datasets:
+        parts.append(
+            f"Saved {len(result.updated_datasets)} dataset version"
+            f"{'s' if len(result.updated_datasets) != 1 else ''}."
+        )
+    else:
+        parts.append("No dataset mutation was saved.")
+    return "\n\n".join(parts)
+
+
+def _json_preview(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _truncate_for_answer(value: str, limit: int = 1200) -> str:
+    cleaned = value.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit].rstrip()}\n... truncated ..."
+
+
+def _execution_has_user_value(result: ExecutionResult) -> bool:
+    return bool(
+        result.stdout.strip()
+        or result.result_preview is not None
+        or result.artifacts
+        or result.updated_datasets
+        or (not result.ok and (result.stderr.strip() or result.traceback))
+    )
 
 
 def _model_dump(item: Any) -> dict[str, Any]:

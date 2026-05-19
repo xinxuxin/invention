@@ -152,3 +152,17 @@
 - Switched local backend to real OpenAI mode using the user-provided key only as an ephemeral process environment variable; confirmed the key is not present in project files.
 - Fixed read-only executor performance for large datasets by returning full child-process dataset state only when `mutates_state=True`.
 - Verified real OpenAI chat against the uploaded SoftBank pickle returns streamed trace/code results/final answer without timeout.
+- Started focused bugfix and frontend polish pass from user feedback.
+- Replaced the agent's retry-limit and step-limit terminal errors with user-facing final-answer fallbacks based on the latest execution result or traceback.
+- Added backend regression tests so Python retry exhaustion and internal step-budget exhaustion end with `final_answer` events instead of raw `error` events.
+- Added dismiss controls to upload/export/session toast notifications.
+- Fixed long dataset keys in dataset cards and chat context to wrap cleanly instead of overflowing.
+- Split the dashboard into Chat and Explore workspaces: chat stays focused on conversation and run context, while profile inspection, generated charts/tables, CSV exports, and selected history details live in Explore.
+- Added animated trace folding: new trace/code events expand, then auto-collapse; Python result rows can be toggled and failed rows fold after briefly showing the error.
+- Polished workspace tab transitions and trace/result animations for a calmer live-demo feel.
+- Added `dir`, `vars`, and `callable` to the executor's safe builtins so generated Python can inspect custom objects without avoidable retries.
+- Improved step-budget fallback to summarize the most recent informative execution result instead of letting a later empty execution hide useful output.
+- Verified real OpenAI chat now returns a `final_answer` when the model reaches the step budget instead of the prior step-limit error.
+- Verified backend tests pass: `50 passed`.
+- Verified backend lint passes: `ruff check .`.
+- Verified frontend build passes: `npm run build`.

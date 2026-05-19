@@ -11,7 +11,7 @@ without assuming schemas.
 Data Analysis Agent is an AI data workspace with:
 
 - A FastAPI backend for sessions, uploads, versioned snapshots, agent execution, artifacts, and CSV export.
-- A React/Vite/TypeScript frontend with a three-panel data workspace: datasets and branch history on the left, streamed chat in the center, and inspector/artifacts on the right.
+- A React/Vite/TypeScript frontend with a polished workspace: datasets and branch history on the left, focused streamed chat in the main view, and an Explore view for profiles, artifacts, charts, CSV export, and selected history details.
 - A Python execution runtime that loads session state, runs model-written Python code, captures stdout/errors, persists requested mutations, and stores generated artifacts.
 - Branch/fork/rollback history so users can explore destructive transformations without losing prior states.
 - Cross-session persistence through SQLite/filesystem storage and frontend session restoration.
@@ -38,9 +38,10 @@ data types.
 
 ```text
 React + Vite + TypeScript
-  - upload/dropzone, chat, trace stream, inspector, artifacts, branch timeline
+  - upload/dropzone, chat, trace stream, Explore view, inspector, artifacts, branch timeline
   - Server-Sent Events client for streamed agent events
   - localStorage restores the last backend session across browser sessions
+  - dismissible notifications and animated collapsible traces/results
 
 FastAPI
   - sessions, datasets, branches, versions, exports, artifacts, confirmations
@@ -163,8 +164,10 @@ The agent does not expose hidden chain-of-thought. Only concise public progress 
 - `message_done`
 - `error`
 
-The UI renders trace events in a collapsible panel and final answers in a visually distinct card.
-There is no spinner-only behavior: users see the agent's public progress as it works.
+The UI renders trace events in a collapsible animated panel and final answers in a visually distinct
+card. New trace/code events briefly expand, then fold into a compact summary so long errors such as
+timeouts remain inspectable without overwhelming the chat. There is no spinner-only behavior: users
+see the agent's public progress as it works.
 
 ## Session State And Mutations
 

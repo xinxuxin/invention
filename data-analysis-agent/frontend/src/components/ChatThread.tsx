@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { motion } from "framer-motion";
+import { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
   Bot,
@@ -150,8 +150,19 @@ function TracePanel({ trace }: { trace: ChatTraceEvent[] }) {
   const [open, setOpen] = useState(true);
   const latest = trace[trace.length - 1];
 
+  useEffect(() => {
+    if (!latest) {
+      return;
+    }
+
+    setOpen(true);
+    const delay = latest.type === "code_started" ? 7600 : latest.type === "code_result_summary" ? 5600 : 4200;
+    const timer = window.setTimeout(() => setOpen(false), delay);
+    return () => window.clearTimeout(timer);
+  }, [latest?.id, latest?.type]);
+
   return (
-    <section className="overflow-hidden rounded-lg border border-border bg-white/72">
+    <motion.section layout className="overflow-hidden rounded-lg border border-border bg-white/72 shadow-sm">
       <button
         type="button"
         className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
@@ -169,14 +180,33 @@ function TracePanel({ trace }: { trace: ChatTraceEvent[] }) {
           <ChevronDown className={cn("h-4 w-4 transition", open ? "rotate-180" : "")} />
         </span>
       </button>
-      {open ? (
-        <div className="space-y-2 border-t border-border/70 p-3">
-          {trace.map((item) => (
-            <TraceRow key={item.id} item={item} />
-          ))}
-        </div>
-      ) : null}
-    </section>
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.div
+            key="trace-body"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.26, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden border-t border-border/70"
+          >
+            <div className="space-y-2 p-3">
+              {trace.map((item) => (
+                <motion.div
+                  key={item.id}
+                  layout
+                  initial={{ opacity: 0, y: 7, scale: 0.99 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  transition={{ duration: 0.22, ease: "easeOut" }}
+                >
+                  <TraceRow item={item} />
+                </motion.div>
+              ))}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </motion.section>
   );
 }
 
@@ -196,35 +226,7 @@ function TraceRow({ item }: { item: ChatTraceEvent }) {
   }
 
   if (item.type === "code_result_summary") {
-    return (
-      <div
-        className={cn(
-          "rounded-md border p-3 text-xs",
-          item.ok ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50",
-        )}
-      >
-        <div className="flex items-center gap-2 font-bold">
-          {item.ok ? (
-            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-700" />
-          ) : (
-            <AlertTriangle className="h-3.5 w-3.5 text-rose-700" />
-          )}
-          Code {item.ok ? "completed" : "failed"}
-        </div>
-        {item.stdout ? <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap">{item.stdout}</pre> : null}
-        {item.stderr || item.traceback ? (
-          <pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap text-rose-800">
-            {item.stderr || item.traceback}
-          </pre>
-        ) : null}
-        {item.updatedDatasets?.length ? (
-          <p className="mt-2 font-semibold text-teal-800">
-            Saved {item.updatedDatasets.length} dataset version
-            {item.updatedDatasets.length === 1 ? "" : "s"}.
-          </p>
-        ) : null}
-      </div>
-    );
+    return <CodeResultRow item={item} />;
   }
 
   if (item.type === "error") {
@@ -240,6 +242,88 @@ function TraceRow({ item }: { item: ChatTraceEvent }) {
       <span className="mt-1 h-2 w-2 rounded-full bg-teal-500" />
       <span className="leading-5 text-slate-700">{item.message ?? traceSummary(item)}</span>
     </div>
+  );
+}
+
+function CodeResultRow({ item }: { item: ChatTraceEvent }) {
+  const [open, setOpen] = useState(true);
+  const detail = item.ok ? item.stdout : item.stderr || item.traceback || item.stdout;
+
+  useEffect(() => {
+    if (item.ok) {
+      const timer = window.setTimeout(() => setOpen(false), 3600);
+      return () => window.clearTimeout(timer);
+    }
+
+    const timer = window.setTimeout(() => setOpen(false), 5200);
+    return () => window.clearTimeout(timer);
+  }, [item.id, item.ok]);
+
+  return (
+    <motion.div
+      layout
+      className={cn(
+        "overflow-hidden rounded-md border text-xs",
+        item.ok ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50",
+      )}
+    >
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="flex min-w-0 items-center gap-2 font-bold">
+          {item.ok ? (
+            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-700" />
+          ) : (
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-700" />
+          )}
+          <span>Code {item.ok ? "completed" : "failed"}</span>
+          {item.updatedDatasets?.length ? (
+            <span className="rounded-full bg-teal-700 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
+              saved
+            </span>
+          ) : null}
+        </span>
+        <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
+          <span className="truncate">{compactResultSummary(item)}</span>
+          <ChevronDown className={cn("h-4 w-4 shrink-0 transition", open ? "rotate-180" : "")} />
+        </span>
+      </button>
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.div
+            key="code-result-detail"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="border-t border-white/80 px-3 py-2.5">
+              {detail ? (
+                <pre
+                  className={cn(
+                    "max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-white/70 p-2 leading-5",
+                    item.ok ? "text-emerald-900" : "text-rose-800",
+                  )}
+                >
+                  {detail}
+                </pre>
+              ) : (
+                <p className="font-medium text-muted-foreground">No console output.</p>
+              )}
+              {item.updatedDatasets?.length ? (
+                <p className="mt-2 font-semibold text-teal-800">
+                  Saved {item.updatedDatasets.length} dataset version
+                  {item.updatedDatasets.length === 1 ? "" : "s"}.
+                </p>
+              ) : null}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </motion.div>
   );
 }
 
@@ -345,4 +429,20 @@ function traceSummary(item?: ChatTraceEvent) {
     return "Error";
   }
   return item.type;
+}
+
+function compactResultSummary(item: ChatTraceEvent) {
+  if (item.type !== "code_result_summary") {
+    return traceSummary(item);
+  }
+
+  if (item.updatedDatasets?.length) {
+    return `${item.updatedDatasets.length} version${item.updatedDatasets.length === 1 ? "" : "s"} saved`;
+  }
+
+  const text = item.ok ? item.stdout : item.stderr || item.traceback;
+  if (!text) {
+    return item.ok ? "No output" : "See error";
+  }
+  return text.replace(/\s+/g, " ").slice(0, 96);
 }

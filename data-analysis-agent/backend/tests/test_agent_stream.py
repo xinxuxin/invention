@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.agent.agent import AgentModelResponse, AgentToolCall
+from app.agent.agent import MAX_AGENT_STEPS, AgentModelResponse, AgentToolCall
 from app.api.chat import get_model_client
 from app.core.config import get_settings
 from app.db.session import get_session
@@ -109,6 +109,55 @@ def test_agent_retries_after_python_error(client: TestClient) -> None:
     assert [event["ok"] for event in result_events] == [False, True]
     assert any("retrying" in event.get("message", "") for event in events if event["type"] == "trace")
     assert events[-2]["type"] == "final_answer"
+
+
+def test_agent_returns_final_answer_after_retry_budget(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response("execute_python", {"code": "preview(data['missing_one'])"}),
+            _tool_response("execute_python", {"code": "preview(data['missing_two'])"}),
+            _tool_response("execute_python", {"code": "preview(data['missing_three'])"}),
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Trigger the retry limit", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    assert response.status_code == 200
+    assert [event["ok"] for event in events if event["type"] == "code_result_summary"] == [False, False, False]
+    assert events[-2]["type"] == "final_answer"
+    assert "could not complete" in events[-2]["answer"].lower()
+    assert not any(event["type"] == "error" and "Maximum Python retry" in event["message"] for event in events)
+
+
+def test_agent_summarizes_latest_execution_after_step_limit(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [_tool_response("execute_python", {"code": "print('useful step')\npreview({'rows': len(data)})"})]
+        + [
+            _tool_response("execute_python", {"code": "pass"})
+            for _ in range(MAX_AGENT_STEPS - 1)
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Keep inspecting until the step limit", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    assert response.status_code == 200
+    assert len([event for event in events if event["type"] == "code_result_summary"]) == MAX_AGENT_STEPS
+    assert events[-2]["type"] == "final_answer"
+    assert "step budget" in events[-2]["answer"]
+    assert "useful step" in events[-2]["answer"]
+    assert not any(event["type"] == "error" and "step limit" in event["message"] for event in events)
 
 
 def test_destructive_mutation_requires_confirmation(client: TestClient) -> None:
