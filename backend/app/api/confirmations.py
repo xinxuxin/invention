@@ -36,7 +36,7 @@ def approve_confirmation(
     confirmation = _pending_confirmation_or_404(session_id, confirmation_id, db)
     if confirmation.tool_arguments.get("operation_kind") == "rollback":
         return _approve_rollback_confirmation(confirmation, db)
-    if confirmation.tool_arguments.get("operation_kind") in {"delete_last_n", "delete_empty_title"}:
+    if confirmation.tool_arguments.get("operation_kind") in {"delete_last_n", "delete_empty_title", "remove_battery_below"}:
         return _approve_direct_mutation_confirmation(confirmation, db)
 
     events: list[dict[str, Any]] = [
@@ -228,6 +228,11 @@ def _approve_direct_mutation_confirmation(
             new_value, preview = _delete_last_n_value(current_value, int(confirmation.tool_arguments.get("delete_count") or 0))
         elif operation_kind == "delete_empty_title":
             new_value, preview = _delete_empty_title_value(current_value)
+        elif operation_kind == "remove_battery_below":
+            new_value, preview = _remove_battery_below_value(
+                current_value,
+                float(confirmation.tool_arguments.get("threshold") or 0),
+            )
         else:
             raise ValueError(f"Unsupported direct mutation: {operation_kind}")
 
@@ -347,6 +352,48 @@ def _delete_empty_title_value(value: Any) -> tuple[Any, dict[str, Any]]:
         "affected_count": int(affected_count),
         "current_row_count": int(current_count),
         "new_row_count": _safe_len(new_value),
+    }
+
+
+def _remove_battery_below_value(value: Any, threshold: float) -> tuple[Any, dict[str, Any]]:
+    def keep(item: Any) -> bool:
+        record = object_to_record(item)
+        try:
+            return float(record.get("battery_pct")) >= threshold
+        except (TypeError, ValueError):
+            return True
+
+    if isinstance(value, pd.DataFrame):
+        current_count = int(len(value))
+        if "battery_pct" not in value.columns:
+            raise ValueError("No battery_pct field exists on this dataset")
+        values = pd.to_numeric(value["battery_pct"], errors="coerce")
+        mask = values.isna() | (values >= threshold)
+        affected_count = current_count - int(mask.sum())
+        new_value = value.loc[mask].copy()
+    elif hasattr(value, "readings"):
+        readings = list(getattr(value, "readings"))
+        current_count = len(readings)
+        kept = [item for item in readings if keep(item)]
+        affected_count = current_count - len(kept)
+        setattr(value, "readings", kept)
+        new_value = value
+    elif isinstance(value, list):
+        current_count = len(value)
+        new_value = [item for item in value if keep(item)]
+        affected_count = current_count - len(new_value)
+    elif isinstance(value, tuple):
+        current_count = len(value)
+        new_value = tuple(item for item in value if keep(item))
+        affected_count = current_count - len(new_value)
+    else:
+        raise ValueError("This object type does not support battery-based filtering safely")
+
+    return new_value, {
+        "full_scan": True,
+        "affected_count": int(affected_count),
+        "current_row_count": int(current_count),
+        "new_row_count": _safe_len(getattr(new_value, "readings", new_value)),
     }
 
 

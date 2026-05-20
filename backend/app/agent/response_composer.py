@@ -241,6 +241,9 @@ def _summary_from_preview(preview: Any) -> str:
         semantic = _semantic_summary_from_preview(preview)
         if semantic:
             return semantic
+        summary = preview.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return _compact(summary, 700)
         if preview.get("type") == "dataframe":
             shape = preview.get("shape")
             if isinstance(shape, list) and len(shape) >= 2:

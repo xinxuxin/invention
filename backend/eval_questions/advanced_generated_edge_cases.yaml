@@ -1,0 +1,34 @@
+suite: advanced_generated_edge_cases
+description: Advanced generated arbitrary-structure scenarios for nested dicts, dicts of DataFrames and arrays, custom classes, and mixed top-level collections.
+scenarios:
+  - id: nested_clarification_and_full_export
+    datasets: [nested_customer_events]
+    fresh_session: true
+    steps:
+      - ask: "Clean this dataset."
+      - ask: "Normalize all purchase event items into a table with customer_id, event_id, sku, name, quantity, unit_price, line_total, and export it as CSV."
+      - ask: "Find possible data quality issues in this customer event dataset, but do not mutate anything. Check missing customer_id, missing event_id, negative order_total, and risk flags with missing severity."
+  - id: mixed_bundle_compound_and_arrays
+    datasets: [mixed_dataframe_numpy_bundle]
+    fresh_session: true
+    steps:
+      - ask: "Join users and orders on user_id, show revenue by country as a table, create a bar chart, and export the joined country summary as CSV."
+      - ask: "Inspect user_embedding_matrix and cohort_tensor. Summarize their shapes, dtypes, and basic statistics without dumping the full arrays."
+      - ask: "Join daily_metrics with users."
+  - id: custom_sensor_mutation_reject_and_rollback
+    datasets: [custom_sensor_fleet]
+    fresh_session: true
+    steps:
+      - ask: "Remove readings with battery_pct below 80, but ask for confirmation first."
+      - reject_confirmation: true
+      - ask: "How many sensor readings are in the current dataset?"
+      - ask: "Remove readings with battery_pct below 80, but ask for confirmation first."
+      - approve_confirmation: true
+      - ask: "Show me the mutation history so far."
+      - ask: "Roll back to the original uploaded dataset."
+      - approve_confirmation: true
+  - id: mixed_collection_no_crash
+    datasets: [mixed_top_level_collection]
+    fresh_session: true
+    steps:
+      - ask: "Explain each top-level element, then create a table with element_index, type, shape or length, and whether it is tabular."

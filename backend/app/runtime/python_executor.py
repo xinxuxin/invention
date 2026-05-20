@@ -32,7 +32,7 @@ from app.services.introspection import introspect_object
 from app.services.versioning import dataset_key, latest_versions_for_branch, sync_branch_pointer
 from app.storage.files import load_pickle, save_snapshot
 
-DEFAULT_TIMEOUT_SECONDS = 5
+DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_MAX_STDOUT = 20_000
 DEFAULT_MAX_PREVIEW = 12_000
 MAX_CHART_ROWS = 500

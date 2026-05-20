@@ -1,0 +1,56 @@
+suite: advanced_state_softbank
+description: Advanced stateful SoftBank scenarios covering confirmation, rejection, rollback, branch/fork, refresh persistence, and safe destructive prompts.
+dataset_env: E2E_SOFTBANK_PKL_PATH
+scenarios:
+  - id: confirmation_reject_delete
+    dataset: softbank
+    fresh_session: true
+    steps:
+      - ask: "How many records are in the current working dataset?"
+      - ask: "delete last 500 entries"
+        expect_confirmation: true
+      - reject_confirmation: true
+      - ask: "How many records are in the current working dataset now?"
+  - id: confirmation_approve_delete_and_rollback
+    dataset: softbank
+    fresh_session: true
+    steps:
+      - ask: "delete last 500 entries"
+      - approve_confirmation: true
+      - ask: "How many records are in the current working dataset now?"
+      - ask: "Show me the mutation history so far."
+      - ask: "Roll back to the original uploaded dataset."
+      - approve_confirmation: true
+      - ask: "How many records are in the current working dataset now?"
+  - id: zero_and_ambiguous_safety
+    dataset: softbank
+    fresh_session: true
+    steps:
+      - ask: "delete empty title"
+      - ask: "Remove bad records."
+      - ask: "Clean this dataset."
+      - ask: "Delete everything."
+  - id: branch_fork_and_switch
+    dataset: softbank
+    fresh_session: true
+    steps:
+      - ask: "Create a branch called advanced-eval from the current dataset."
+      - ask: "Show me the mutation history so far."
+      - ask: "Switch back to the main branch."
+      - approve_confirmation: true
+  - id: refresh_persistence_after_mutation
+    dataset: softbank
+    fresh_session: true
+    steps:
+      - ask: "delete last 500 entries"
+      - approve_confirmation: true
+      - ask: "How many records are in the current working dataset now?"
+      - refresh_session: true
+      - inspect_mutation_history: true
+      - restart_backend_optional: true
+  - id: softbank_export_and_status_artifacts
+    dataset: softbank
+    fresh_session: true
+    steps:
+      - ask: "Export the current working dataset as CSV."
+      - ask: "Make a table and a chart and export the underlying data as CSV for the top statuses."

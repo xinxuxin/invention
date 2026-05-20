@@ -1,0 +1,19 @@
+suite: advanced_multi_dataset
+description: Advanced multi-dataset workflow using all generated arbitrary-structure datasets in one session.
+datasets:
+  - nested_customer_events
+  - mixed_dataframe_numpy_bundle
+  - custom_sensor_fleet
+  - mixed_top_level_collection
+scenarios:
+  - id: multi_dataset_switch_compare_chart
+    fresh_session: true
+    steps:
+      - ask: "List all datasets in this session. For each dataset, show object type, row count or length, and representative fields."
+      - switch_dataset: custom_sensor_fleet
+      - ask: "What's in the active dataset now?"
+      - switch_dataset: nested_customer_events
+      - ask: "What's in the active dataset now?"
+      - ask: "Compare the uploaded datasets by structure style, primary record collection, approximate record count, table/array presence, and whether they contain nested lists."
+      - ask: "Can any of these datasets be joined together directly? Identify possible join keys and explain which joins are not valid."
+      - ask: "Create a bar chart comparing approximate primary record counts for each uploaded dataset."

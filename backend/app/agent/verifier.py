@@ -320,6 +320,13 @@ def merge_verification_results(
     if llm is None or llm.confidence < min_confidence:
         return deterministic
 
+    if (
+        deterministic.passed
+        and deterministic.should_finalize
+        and any("required artifact output is available" in reason.lower() for reason in deterministic.reasons)
+    ):
+        return deterministic
+
     if deterministic.passed and llm.passed:
         return VerificationResult(
             passed=True,

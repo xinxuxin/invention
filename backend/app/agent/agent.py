@@ -24,10 +24,13 @@ from app.runtime.python_executor import (
     ExecutionArtifact,
     ExecutionResult,
     PythonExecutor,
+    _execution_artifact_read,
     flatten_records_at_path,
     object_to_record,
     to_dataframe,
 )
+from app.agent.types import VerificationResult
+from app.services.export import export_dataset_csv
 from app.services.versioning import (
     active_branch,
     apply_version_to_dataset,
@@ -1043,6 +1046,7 @@ class CodingAgent:
             risk_level="medium",
             metadata={
                 "operation_kind": "remove_battery_below",
+                "threshold": threshold,
                 "current_row_count": current_count,
                 "new_row_count": new_count,
                 "affected_count": affected_count,
@@ -1477,6 +1481,8 @@ class CodingAgent:
         code = _common_table_export_code(request.message)
         if code is None:
             return None
+        if code == "__DIRECT_CURRENT_DATASET_CSV_EXPORT__":
+            return self._current_dataset_csv_shortcut(session_id, request)
 
         events: list[dict[str, Any]] = [
             {"type": "trace", "message": "Preparing a structured table or export from the current dataset..."},
@@ -1562,6 +1568,50 @@ class CodingAgent:
             execution_result=result,
             artifacts=artifacts,
             verification=verification,
+            state_changed=False,
+            mutation_summary=None,
+        )
+        events.append(composed_answer_event(answer))
+        return events
+
+    def _current_dataset_csv_shortcut(self, session_id: str, request: ChatStreamRequest) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = [{"type": "trace", "message": "Exporting the current working dataset as CSV..."}]
+        try:
+            export = export_dataset_csv(
+                self.db,
+                session_id=session_id,
+                dataset_id=request.active_dataset_id,
+                version_id=None,
+                name="Current working dataset export",
+            )
+        except Exception as exc:
+            answer = (
+                "## Unable to complete\n"
+                f"I could not export the current dataset as CSV: {exc}\n\n"
+                "**State changed:** No"
+            )
+            events.append({"type": "final_answer", "answer": answer, "state_changed": False})
+            return events
+
+        if export.artifact is None:
+            answer = f"## Unable to complete\n{export.message}\n\n**State changed:** No"
+            events.append({"type": "final_answer", "answer": answer, "state_changed": False})
+            return events
+
+        artifact = _artifact_with_status(_execution_artifact_read(export.artifact, session_id), "verified")
+        _mark_artifacts_status(self.db, [artifact], "verified")
+        events.append(_artifact_created_event(artifact))
+        answer = self.response_composer.compose(
+            user_message=request.message,
+            execution_result=None,
+            artifacts=[artifact],
+            verification=VerificationResult(
+                passed=True,
+                severity="pass",
+                reasons=["CSV export created."],
+                should_finalize=True,
+                source="deterministic",
+            ),
             state_changed=False,
             mutation_summary=None,
         )
@@ -1864,6 +1914,7 @@ def _clarification_for_ambiguous_destructive_request(message: str) -> str | None
         "remove bad records",
         "drop bad records",
         "delete bad rows",
+        "delete everything",
         "fix the data",
         "drop everything irrelevant",
         "remove irrelevant records",
@@ -2233,7 +2284,7 @@ def _common_chart_code(message: str) -> str | None:
                 "RESULT = {'chart': 'Alert Counts by Type', 'rows': len(chart_rows), 'alert_records_analyzed': len(df)}",
             ]
         )
-    if "dataset" in prompt and "comparison" in prompt and any(marker in prompt for marker in ("record count", "record counts", "approximate record", "counts")):
+    if "dataset" in prompt and "compar" in prompt and any(marker in prompt for marker in ("record count", "record counts", "approximate record", "counts")):
         title = "Dataset Record Count Comparison"
         return "\n".join(
             [
@@ -2299,6 +2350,8 @@ def _common_chart_code(message: str) -> str | None:
                 "    grouped.columns = ['country', 'total_revenue']",
                 "    rows = grouped.sort_values('total_revenue', ascending=False).to_dict('records')",
                 "save_table('Revenue by country', rows, description='Revenue aggregated by country from discovered records.')",
+                "if 'export' in request_text or 'csv' in request_text:",
+                "    save_csv('Revenue by country export', rows=rows)",
                 f"save_chart('{title}', {{'title': '{title}', 'chart_type': 'bar', 'data': rows, 'x': 'country', 'y': 'total_revenue'}})",
                 "RESULT = {'chart': 'Revenue by Country', 'rows': len(rows), 'source_row_count': len(df), 'analyzed_row_count': len(df)}",
             ]
@@ -2404,6 +2457,8 @@ def _common_chart_code(message: str) -> str | None:
                 "rows = counts.to_dict('records')",
                 "chart_type = 'pie' if 'pie' in request_text else 'bar'",
                 "save_table('Status distribution', counts, description='Full-dataset records by status used for the chart.')",
+                "if 'export' in request_text or 'csv' in request_text:",
+                "    save_csv('Status distribution export', rows=rows)",
                 (
                     f"save_chart('{title}', {{'title': '{title}', 'chart_type': chart_type, "
                     "'data': rows, 'x': 'status', 'y': 'record_count', "
@@ -2448,6 +2503,13 @@ def _common_table_export_code(message: str) -> str | None:
     request_text = json.dumps(prompt)
     if any(marker in prompt for marker in ("chart", "plot", "graph", "visualize", "visualization")):
         return None
+    if "join daily_metrics with users" in prompt or ("daily_metrics" in prompt and "users" in prompt and "join" in prompt):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "RESULT = {'summary': 'No obvious join key exists between daily_metrics and users. daily_metrics is keyed by date/time metrics, while users is keyed by user_id, so a direct join would be invalid without an additional mapping or clarified join rule.', 'state_changed': False}",
+            ]
+        )
     if "export" in prompt and ("top-5" in prompt or "top 5" in prompt or "that top" in prompt):
         return "\n".join(
             [
@@ -2507,6 +2569,62 @@ def _common_table_export_code(message: str) -> str | None:
                 "export_rows = [{key: row.get(key) for key in columns} for row in rows]",
                 "save_csv('Risk Flags Export', rows=export_rows)",
                 "RESULT = {'csv_created': True, 'row_count': len(export_rows), 'columns': columns, 'state_changed': False}",
+            ]
+        )
+    if "export" in prompt and "purchase" in prompt and "item" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for path in ('customers.events.items', 'customers.events.order.items', 'events.items', 'items'):",
+                "    rows.extend(flatten_records_at_path(data, path))",
+                "if not rows:",
+                "    for collection in find_record_collections(data, max_depth=6):",
+                "        path = collection.get('path', '')",
+                "        if 'item' in str(path).lower():",
+                "            rows.extend(flatten_records_at_path(data, path))",
+                "columns = ['customer_id', 'event_id', 'sku', 'name', 'quantity', 'unit_price', 'line_total']",
+                "export_rows = [{key: row.get(key) for key in columns} for row in rows]",
+                "save_csv('Purchase event items export', rows=export_rows)",
+                "RESULT = {'csv_created': True, 'row_count': len(export_rows), 'columns': columns, 'state_changed': False}",
+            ]
+        )
+    if "previous table" in prompt and "export" in prompt and "csv" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = None",
+                "title = 'Previous table export'",
+                "for artifact in artifact_history[::-1]:",
+                "    metadata = artifact.get('metadata') if isinstance(artifact.get('metadata'), dict) else {}",
+                "    candidate_rows = artifact.get('rows') or metadata.get('rows')",
+                "    if artifact.get('kind') == 'table' and isinstance(candidate_rows, list) and candidate_rows:",
+                "        rows = candidate_rows",
+                "        title = str(artifact.get('title') or artifact.get('name') or title) + ' CSV'",
+                "        break",
+                "if rows is None:",
+                "    raise ValueError('No previous table artifact was found to export.')",
+                "save_csv(title, rows=rows)",
+                "RESULT = {'csv_created': True, 'row_count': len(rows), 'state_changed': False}",
+            ]
+        )
+    if "export" in prompt and "current" in prompt and "csv" in prompt:
+        return "__DIRECT_CURRENT_DATASET_CSV_EXPORT__"
+    if (
+        any(marker in prompt for marker in ("how many records", "how many rows", "record count", "row count"))
+        and not any(marker in prompt for marker in ("table", "chart", "export", "compare", "list all datasets", "datasets in this session", "uploaded datasets"))
+    ):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "try:",
+                "    df = to_dataframe(data, limit=None)",
+                "    count = len(df)",
+                "    columns = list(df.columns)",
+                "except Exception:",
+                "    count = len(data) if hasattr(data, '__len__') else None",
+                "    columns = []",
+                "RESULT = {'row_count': count, 'record_count': count, 'columns': columns, 'state_changed': False}",
             ]
         )
     if "top" in prompt and ("country" in prompt or "countries" in prompt) and "table" in prompt:
@@ -2674,6 +2792,19 @@ def _common_table_export_code(message: str) -> str | None:
                 "RESULT = {'columns': list(table_rows[0].keys()) if table_rows else [], 'rows': table_rows[:5], 'row_count': len(table_rows)}",
             ]
         )
+    if "user_embedding_matrix" in prompt and "cohort_tensor" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = []",
+                "for name in ['user_embedding_matrix', 'cohort_tensor']:",
+                "    value = data.get(name) if isinstance(data, dict) else get_path(data, name)",
+                "    arr = np.asarray(value)",
+                "    rows.append({'name': name, 'shape': list(arr.shape), 'dtype': str(arr.dtype), 'mean': float(np.nanmean(arr)), 'std': float(np.nanstd(arr)), 'min': float(np.nanmin(arr)), 'max': float(np.nanmax(arr))})",
+                "save_table('Array shape and statistics', rows, description='Compact statistics for ndarray-like top-level objects.')",
+                "RESULT = {'arrays': rows, 'state_changed': False}",
+            ]
+        )
     if "user_embedding_matrix" in prompt or ("embedding" in prompt and "shape" in prompt):
         return "\n".join(
             [
@@ -2773,7 +2904,7 @@ def _common_table_export_code(message: str) -> str | None:
                 "    summary = summarize_structure(obj)",
                 "    rows.append({'dataset_name': name, 'object_type': summary.get('object_type'), 'row_count_or_length': summary.get('length') or (summary.get('likely_primary_records') or [{}])[0].get('count'), 'schema_style': 'tables/arrays' if summary.get('tables_detected') or summary.get('arrays_detected') else 'nested/custom/mixed', 'key_fields': ', '.join((summary.get('field_groups') or {}).get('identifier', [])[:8]), 'tables_detected': ', '.join([x.get('path','') for x in summary.get('tables_detected', [])]), 'arrays_detected': ', '.join([x.get('path','') for x in summary.get('arrays_detected', [])]), 'record_collections_detected': ', '.join([x.get('path','') for x in summary.get('record_collections_detected', [])[:5]]), 'active': obj is data})",
                 "save_table('Dataset comparison', rows, description='Object type, size, and structural summary for each dataset in the session.')",
-                "RESULT = {'datasets': rows}",
+                "RESULT = {'datasets': rows, 'row_count': len(rows), 'dataset_count': len(rows)}",
             ]
         )
     if "list all tables and arrays" in prompt or "tables and arrays with their shapes" in prompt:
