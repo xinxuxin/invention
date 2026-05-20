@@ -207,8 +207,8 @@ def test_fake_agent_asks_clarification_before_ambiguous_destructive_write(client
     )
 
     assert not any(event["type"] == "code_result_summary" for event in events)
-    assert events[-2]["type"] == "final_answer"
-    assert "which identifier field" in events[-2]["answer"].lower()
+    assert events[-2]["type"] == "clarification_required"
+    assert "which identifier field" in events[-2]["message"].lower()
     assert events[-2]["state_changed"] is False
 
 

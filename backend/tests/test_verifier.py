@@ -102,6 +102,24 @@ def test_mutation_without_confirmation_retries() -> None:
     assert "request_confirmation" in result.retry_instruction
 
 
+def test_country_filter_mutation_reaching_executor_is_hard_retry() -> None:
+    result = ResultVerifier().verify(
+        user_message="delete all non japan entries",
+        execution_result=ExecutionResult(
+            ok=False,
+            stdout="",
+            stderr="Execution timed out after 60 seconds.",
+            traceback=None,
+            result_preview=None,
+        ),
+        latest_code="filtered = [rec for rec in data if object_to_record(rec).get('country') == 'JP']",
+    )
+
+    assert result.severity == "retry"
+    assert result.hard_fail is True
+    assert "optimized mutation preflight" in result.retry_instruction
+
+
 def test_invalid_chart_artifact_retries() -> None:
     chart = ExecutionArtifact(
         id="chart-1",

@@ -22,6 +22,45 @@ scenarios:
       - ask: "Roll back to the original uploaded dataset."
       - approve_confirmation: true
       - ask: "How many records are in the current working dataset now?"
+  - id: country_filter_mutation_optimized
+    dataset: softbank
+    fresh_session: true
+    steps:
+      - ask: "delete all non japan entries"
+        expect_confirmation: true
+      - reject_confirmation: true
+      - ask: "How many records are in the current working dataset now?"
+      - ask: "delete all non japan entries"
+        expect_confirmation: true
+      - approve_confirmation: true
+      - ask: "How many records are in the current working dataset now?"
+      - ask: "Show me the mutation history so far."
+      - ask: "Roll back to the original uploaded dataset."
+      - approve_confirmation: true
+      - ask: "How many records are in the current working dataset now?"
+  - id: generic_softbank_status_and_derived_mutations
+    dataset: softbank
+    fresh_session: true
+    steps:
+      - ask: "keep only granted patents"
+        expect_confirmation: true
+      - approve_confirmation: true
+      - ask: "How many records are in the current working dataset now, and what statuses are present?"
+      - ask: "Roll back to the original uploaded dataset."
+      - approve_confirmation: true
+      - ask: "Add a derived field called filing_year based on filing_date and persist it."
+        expect_confirmation: true
+      - approve_confirmation: true
+      - ask: "Show the first 5 rows with country, doc_number, filing_date, and filing_year."
+      - ask: "Roll back to the original uploaded dataset."
+      - approve_confirmation: true
+  - id: generic_duplicate_and_ambiguous_mutations
+    dataset: softbank
+    fresh_session: true
+    steps:
+      - ask: "remove duplicate records based on country, doc_number, kind, and title"
+      - ask: "delete all non active entries"
+      - ask: "Remove bad records."
   - id: zero_and_ambiguous_safety
     dataset: softbank
     fresh_session: true

@@ -1,6 +1,7 @@
 import csv
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from app.core.config import get_settings
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode, new_id
 from app.runtime.python_executor import (
     PythonExecutor,
+    fast_get_field,
     find_record_collections,
     flatten_records_at_path,
     inspect_object,
@@ -73,6 +75,26 @@ class DummyPydanticWrapper:
             "__pydantic_fields_set__": {"country", "title"},
             "__pydantic_private__": None,
         }
+
+
+@dataclass
+class DummyDataclassRecord:
+    country: str
+    title: str
+
+
+class DummyCustomRecord:
+    def __init__(self, country: str) -> None:
+        self.country = country
+
+
+def test_fast_get_field_reads_common_record_shapes() -> None:
+    assert fast_get_field({"country": "JP"}, "country") == "JP"
+    assert fast_get_field(DummyDataclassRecord(country="CN", title="Robot"), "country") == "CN"
+    assert fast_get_field(DummyCustomRecord("US"), "country") == "US"
+    assert fast_get_field(DummyPydanticWrapper(), "country") == "CA"
+    assert fast_get_field(DummyMissingPatent(country="JP", title="Robot"), "country") == "JP"
+    assert fast_get_field(DummyCustomRecord("US"), "missing") is None
 
 
 def test_executor_can_inspect_dataframe(db_session: Session) -> None:

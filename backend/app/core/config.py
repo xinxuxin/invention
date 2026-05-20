@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     agent_model_mode: str = "openai"
     agent_mode: str | None = None
     fake_agent_mode: bool = False
+    python_execution_timeout_seconds: int = 60
+    mutation_persist_timeout_seconds: int = 120
     agent_max_steps: int = 6
     agent_max_retries: int = 3
     verifier_mode: str = "hybrid"

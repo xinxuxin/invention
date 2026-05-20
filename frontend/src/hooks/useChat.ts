@@ -29,7 +29,7 @@ export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  status?: "streaming" | "done" | "error" | "waiting_confirmation";
+  status?: "streaming" | "done" | "error" | "waiting_confirmation" | "waiting_clarification";
   trace: ChatTraceEvent[];
   finalAnswer?: string;
   highlights?: Array<Record<string, unknown>>;
@@ -62,6 +62,19 @@ export type PendingConfirmation = {
   affectedDatasetIds?: string[];
 };
 
+export type PendingClarification = {
+  assistantMessageId: string;
+  originalMessage: string;
+  title?: string | null;
+  message: string;
+  options: Array<{
+    id?: string;
+    label: string;
+    description?: string | null;
+    message?: string | null;
+  }>;
+};
+
 type UseChatOptions = {
   sessionId?: string | null;
   activeDatasetId?: string | null;
@@ -78,6 +91,7 @@ export function useChat({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
+  const [pendingClarification, setPendingClarification] = useState<PendingClarification | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const loadedSessionRef = useRef<string | null>(null);
 
@@ -89,12 +103,16 @@ export function useChat({
     let mounted = true;
     loadedSessionRef.current = sessionId;
     setPendingConfirmation(null);
+    setPendingClarification(null);
     listMessages(sessionId)
       .then((response) => {
         if (!mounted || loadedSessionRef.current !== sessionId) {
           return;
         }
         setMessages(response.messages.map(persistedMessageToChatMessage));
+        const restored = restorePendingAction(response.messages);
+        setPendingConfirmation(restored.confirmation);
+        setPendingClarification(restored.clarification);
       })
       .catch(() => {
         if (mounted && loadedSessionRef.current === sessionId) {
@@ -138,6 +156,7 @@ export function useChat({
       };
 
       setPendingConfirmation(null);
+      setPendingClarification(null);
       setIsStreaming(true);
       setMessages((current) =>
         options?.reuseAssistantId
@@ -169,6 +188,7 @@ export function useChat({
               originalMessage: trimmed,
               setMessages,
               setPendingConfirmation,
+              setPendingClarification,
               onStateChanged,
             });
           },
@@ -232,6 +252,7 @@ export function useChat({
             originalMessage: pendingConfirmation.originalMessage,
             setMessages,
             setPendingConfirmation,
+            setPendingClarification,
             onStateChanged,
           });
         });
@@ -242,6 +263,28 @@ export function useChat({
       })
       .finally(() => setIsStreaming(false));
   }, [onStateChanged, pendingConfirmation, sendMessage, sessionId]);
+
+  const chooseClarification = useCallback((option: PendingClarification["options"][number]) => {
+    if (!pendingClarification) {
+      return;
+    }
+    const assistantId = pendingClarification.assistantMessageId;
+    const nextMessage = option.message || option.label;
+    setPendingClarification(null);
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === assistantId
+          ? {
+              ...message,
+              status: "done",
+              finalAnswer: `Clarification selected: ${option.label}`,
+              stateChanged: false,
+            }
+          : message,
+      ),
+    );
+    void sendMessage(nextMessage);
+  }, [pendingClarification, sendMessage]);
 
   const cancelPending = useCallback(() => {
     if (!pendingConfirmation) {
@@ -275,6 +318,7 @@ export function useChat({
             originalMessage: pendingConfirmation.originalMessage,
             setMessages,
             setPendingConfirmation,
+            setPendingClarification,
             onStateChanged,
           });
         });
@@ -285,6 +329,26 @@ export function useChat({
       });
   }, [onStateChanged, pendingConfirmation, sessionId]);
 
+  const cancelClarification = useCallback(() => {
+    if (!pendingClarification) {
+      return;
+    }
+    const assistantId = pendingClarification.assistantMessageId;
+    setPendingClarification(null);
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === assistantId
+          ? {
+              ...message,
+              status: "done",
+              finalAnswer: "Canceled. I did not apply a cleaning rule, and the dataset state was left unchanged.",
+              stateChanged: false,
+            }
+          : message,
+      ),
+    );
+  }, [pendingClarification]);
+
   const stop = useCallback(() => {
     controllerRef.current?.abort();
     controllerRef.current = null;
@@ -294,6 +358,7 @@ export function useChat({
   const clearMessages = useCallback(() => {
     setMessages([]);
     setPendingConfirmation(null);
+    setPendingClarification(null);
   }, []);
 
   return {
@@ -301,9 +366,12 @@ export function useChat({
     isStreaming,
     artifacts,
     pendingConfirmation,
+    pendingClarification,
     sendMessage,
     confirmPending,
     cancelPending,
+    chooseClarification,
+    cancelClarification,
     clearMessages,
     stop,
   };
@@ -339,8 +407,87 @@ function persistedMessageToChatMessage(message: PersistedChatMessage): ChatMessa
   };
 }
 
+function restorePendingAction(messages: PersistedChatMessage[]): {
+  confirmation: PendingConfirmation | null;
+  clarification: PendingClarification | null;
+} {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant" || !message.pending_action) {
+      continue;
+    }
+    const previousUser = [...messages.slice(0, index)].reverse().find((item) => item.role === "user");
+    const originalMessage = previousUser?.content ?? "";
+    const action = message.pending_action;
+    if (action.type === "confirmation_required" && message.status === "waiting_confirmation") {
+      return {
+        confirmation: {
+          assistantMessageId: message.id,
+          originalMessage,
+          confirmationId: stringOrNull(action.confirmation_id),
+          message: String(action.message ?? "Confirmation required"),
+          code: stringOrNull(action.proposed_code) ?? stringOrNull(action.code),
+          mutationSummary: stringOrNull(action.mutation_summary),
+          operationSummary: stringOrNull(action.operation_summary),
+          title: stringOrNull(action.title),
+          datasetName: stringOrNull(action.dataset_name),
+          expectedEffect: stringOrNull(action.expected_effect),
+          affectedCount: numberOrNull(action.affected_count),
+          currentRowCount: numberOrNull(action.current_row_count),
+          newRowCount: numberOrNull(action.new_row_count),
+          stateImpact: stringOrNull(action.state_impact),
+          reversible: booleanOrNull(action.reversible),
+          rollbackNote: stringOrNull(action.rollback_note),
+          confirmLabel: stringOrNull(action.confirm_label),
+          cancelLabel: stringOrNull(action.cancel_label),
+          riskLevel: stringOrNull(action.risk_level),
+          affectedDatasetIds: Array.isArray(action.affected_dataset_ids)
+            ? action.affected_dataset_ids.filter((item): item is string => typeof item === "string")
+            : undefined,
+        },
+        clarification: null,
+      };
+    }
+    if (action.type === "clarification_required" && message.status === "waiting_clarification") {
+      const options = Array.isArray(action.options)
+        ? action.options
+            .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object")
+            .map((item) => ({
+              id: stringOrNull(item.id) ?? undefined,
+              label: String(item.label ?? "Option"),
+              description: stringOrNull(item.description),
+              message: stringOrNull(item.message),
+            }))
+        : [];
+      return {
+        confirmation: null,
+        clarification: {
+          assistantMessageId: message.id,
+          originalMessage,
+          title: stringOrNull(action.title),
+          message: String(action.message ?? message.final_answer ?? "Clarification needed"),
+          options,
+        },
+      };
+    }
+  }
+  return { confirmation: null, clarification: null };
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" ? value : null;
+}
+
+function booleanOrNull(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
 function normalizeStatus(status: string): ChatMessage["status"] {
-  if (status === "streaming" || status === "error" || status === "waiting_confirmation") {
+  if (status === "streaming" || status === "error" || status === "waiting_confirmation" || status === "waiting_clarification") {
     return status;
   }
   return "done";
@@ -352,6 +499,7 @@ function handleStreamEvent({
   originalMessage,
   setMessages,
   setPendingConfirmation,
+  setPendingClarification,
   onStateChanged,
 }: {
   event: ChatStreamEvent;
@@ -359,6 +507,7 @@ function handleStreamEvent({
   originalMessage: string;
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
   setPendingConfirmation: Dispatch<SetStateAction<PendingConfirmation | null>>;
+  setPendingClarification: Dispatch<SetStateAction<PendingClarification | null>>;
   onStateChanged?: () => void;
 }) {
   if (event.type === "message_started") {
@@ -410,6 +559,7 @@ function handleStreamEvent({
   }
 
   if (event.type === "confirmation_required") {
+    setPendingClarification(null);
     setPendingConfirmation({
       assistantMessageId: assistantId,
       originalMessage,
@@ -438,15 +588,30 @@ function handleStreamEvent({
           ? {
               ...message,
               status: "waiting_confirmation",
-              trace: [
-                ...message.trace,
-                {
-                  id: crypto.randomUUID(),
-                  type: event.type,
-                  message: event.message,
-                  code: event.code ?? undefined,
-                },
-              ],
+            }
+          : message,
+      ),
+    );
+    return;
+  }
+
+  if (event.type === "clarification_required") {
+    setPendingConfirmation(null);
+    setPendingClarification({
+      assistantMessageId: assistantId,
+      originalMessage,
+      title: event.title,
+      message: event.message,
+      options: event.options ?? [],
+    });
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === assistantId
+          ? {
+              ...message,
+              status: "waiting_clarification",
+              finalAnswer: event.message,
+              stateChanged: false,
             }
           : message,
       ),

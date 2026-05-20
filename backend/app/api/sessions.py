@@ -343,6 +343,7 @@ def _chat_message_read(
         artifact_ids=artifact_ids,
         trace_events=trace_events,
         artifacts=[artifacts_by_id[artifact_id] for artifact_id in artifact_ids if artifact_id in artifacts_by_id],
+        pending_action=message.pending_action if isinstance(message.pending_action, dict) else None,
         created_at=message.created_at,
         updated_at=message.updated_at,
     )

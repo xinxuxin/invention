@@ -25,6 +25,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
+from app.core.config import get_settings
 from app.models.entities import AnalysisSession, Artifact, Branch, Dataset, VersionNode, new_id, utc_now
 from app.schemas.artifact import ChartArtifactSpec
 from app.services.artifacts import persist_artifact
@@ -32,7 +33,7 @@ from app.services.introspection import introspect_object
 from app.services.versioning import dataset_key, latest_versions_for_branch, sync_branch_pointer
 from app.storage.files import load_pickle, save_snapshot
 
-DEFAULT_TIMEOUT_SECONDS = 15
+DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_STDOUT = 20_000
 DEFAULT_MAX_PREVIEW = 12_000
 MAX_CHART_ROWS = 500
@@ -102,12 +103,12 @@ class PythonExecutor:
     def __init__(
         self,
         db: Session,
-        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        timeout_seconds: int | None = None,
         max_stdout_length: int = DEFAULT_MAX_STDOUT,
         max_preview_length: int = DEFAULT_MAX_PREVIEW,
     ) -> None:
         self.db = db
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = timeout_seconds if timeout_seconds is not None else get_settings().python_execution_timeout_seconds
         self.max_stdout_length = max_stdout_length
         self.max_preview_length = max_preview_length
 
@@ -526,6 +527,7 @@ def _child_execute(
         "save_csv": helpers["save_csv"],
         "preview": preview,
         "safe_attrs": safe_attrs,
+        "fast_get_field": fast_get_field,
         "object_to_record": object_to_record,
         "objects_to_records": objects_to_records,
         "to_dataframe": to_dataframe,
@@ -831,6 +833,36 @@ def safe_attrs(obj: Any) -> dict[str, Any]:
 def object_to_record(obj: Any) -> dict[str, Any]:
     record = _domain_record(safe_attrs(obj))
     return _record_safe(record, iso_dates=True)
+
+
+def fast_get_field(obj: Any, field: str) -> Any:
+    if isinstance(obj, pd.Series):
+        return obj.get(field, None)
+    if isinstance(obj, Mapping):
+        return obj.get(field)
+    if is_dataclass(obj) and hasattr(obj, field):
+        return getattr(obj, field, None)
+    if hasattr(obj, field):
+        return getattr(obj, field, None)
+
+    object_dict = getattr(obj, "__dict__", None)
+    if isinstance(object_dict, Mapping):
+        if field in object_dict:
+            return object_dict.get(field)
+        nested_dict = object_dict.get("__dict__")
+        if isinstance(nested_dict, Mapping) and field in nested_dict:
+            return nested_dict.get(field)
+        attrs = object_dict.get("attrs")
+        if isinstance(attrs, Mapping):
+            if field in attrs:
+                return attrs.get(field)
+            nested_attrs = attrs.get("__dict__")
+            if isinstance(nested_attrs, Mapping) and field in nested_attrs:
+                return nested_attrs.get(field)
+        pydantic_extra = object_dict.get("__pydantic_extra__")
+        if isinstance(pydantic_extra, Mapping) and field in pydantic_extra:
+            return pydantic_extra.get(field)
+    return None
 
 
 def objects_to_records(items: Any, limit: int | None = None) -> list[dict[str, Any]]:

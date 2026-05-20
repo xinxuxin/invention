@@ -98,6 +98,7 @@ class ChatMessage(SQLModel, table=True):
     state_changed: bool | None = None
     artifact_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     trace_events: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    pending_action: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now, nullable=False)
     updated_at: datetime = Field(default_factory=utc_now, nullable=False)
 

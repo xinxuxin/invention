@@ -1,5 +1,22 @@
 # Progress Log
 
+## 2026-05-20 Generic Optimized Mutation Framework
+
+- Added an internal `MutationSpec` framework in `backend/app/services/optimized_mutations.py` for controller-level destructive edits without expanding the external agent tool surface.
+- Implemented generic fast accessors, collection replacement, missing-value checks, comparison helpers, record collection discovery, filter-field discovery, deterministic mutation parsing, full impact analysis, and version-safe mutation application.
+- Wired agent preflight to detect clear mutations before LLM code generation, emit full-scan confirmation payloads, and avoid `execute_python` for optimized destructive filters.
+- Wired confirmation approval to apply serialized `MutationSpec` objects through the versioned dataset service, preserving rollback/version history and avoiding Python executor timeouts.
+- Covered country/status filters, nested customer segment/churn filters, dict-of-DataFrame order filters, custom sensor reading filters, missing-field removal, duplicate removal, positional deletion, full deletion, and derived-field creation.
+- Updated verifier/tool guidance so clear field/path mutations reaching generic Python are treated as routing failures.
+- Added targeted regression coverage in `backend/tests/test_optimized_mutations.py` plus existing stream/verifier tests for optimized preflight and approval.
+- Updated advanced eval YAML with SoftBank, nested-customer, mixed-bundle, and custom-sensor optimized mutation scenarios.
+- Updated README with framework examples, safety behavior, clarification behavior, and timeout distinction.
+- Verified backend lint passes: `ruff check app tests scripts`.
+- Verified backend tests pass: `166 passed`.
+- Verified frontend build passes: `npm run build`.
+- Verified frontend lint passes: `npm run lint`.
+- Real API smoke verified country, dict-of-DataFrame order, and nested-customer optimized mutations produce confirmations without `code_started`; approve/reject state behavior passed.
+
 ## 2026-05-18
 
 - Started backend dataset/session implementation phase.
@@ -325,3 +342,31 @@
 - Started current app from the repo root on `http://localhost:8000` and `http://localhost:5173` in deterministic fake-agent mode for regression eval.
 - Generated SoftBank eval report at `backend/eval_reports/softbank_latest`: `14 passed`, `1 warning`, `0 failed`.
 - Generated arbitrary generated-dataset eval report at `backend/eval_reports/generated_latest`: `10 passed`, `0 warning`, `21 failed`; failures are primarily fake-agent coverage gaps for nested/custom/mixed generated datasets and are intentionally visible in the report for reviewer triage.
+
+## 2026-05-19 Final Pre-Submission Verification
+
+- Ran final verification in real-agent mode against `http://127.0.0.1:8000` and `http://localhost:5173` with `FAKE_AGENT_MODE=false`, `AGENT_MODEL_MODE=openai`, `VERIFIER_MODE=hybrid`, and `LLM_VERIFIER_POLICY=selective`.
+- Verified `/health/config` reports `agent_mode=real`, `fake_agent_mode=false`, `verifier_mode=hybrid`, `llm_verifier_policy=selective`, and OpenAI key configured as a boolean only.
+- Verified all expected datasets exist:
+  - `/Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl`
+  - `agent_test_datasets/nested_customer_events.pkl`
+  - `agent_test_datasets/mixed_dataframe_numpy_bundle.pkl`
+  - `agent_test_datasets/custom_sensor_fleet.pkl`
+  - `agent_test_datasets/mixed_top_level_collection.pkl`
+- Ran secret scans for OpenAI secret-prefix patterns and `OPENAI_API_KEY` assignments; no committed API key or key fragment was found.
+- Verified backend lint passes: `ruff check app tests scripts`.
+- Verified backend tests pass: `153 passed`.
+- Verified frontend build passes: `npm run build`.
+- Verified frontend lint passes: `npm run lint`.
+- Generated final SoftBank core report at `backend/eval_reports/final_softbank_core`: `14 passed`, `1 warning`, `0 failed`. The warning is the expected restart check skip inside the core suite; the dedicated restart suite below executes restart persistence.
+- Generated final arbitrary generated-dataset report at `backend/eval_reports/final_generated_all`: `31 passed`, `0 warnings`, `0 failed`.
+- Generated final advanced real workflow report at `backend/eval_reports/final_advanced_real`: `13 passed`, `0 warnings`, `0 failed`.
+- Generated final restart persistence report at `backend/eval_reports/final_restart_persistence`: `13 passed`, `0 warnings`, `0 failed`; subprocess backend restart persistence executed and passed.
+- Generated `backend/eval_reports/final_goal_audit.md` with coverage for required and stretch goals.
+- Generated `backend/eval_reports/final_manual_qa.md` summarizing browser/manual QA coverage and screenshot evidence.
+- Updated README with the latest architecture/tool-surface description, tested data shapes, artifact rendering notes, live demo script, final eval commands, and latest validation table.
+- Important final fixes made during verification:
+  - Conceptual inspection shortcuts now include full length, top-level keys/items, primary record collections, and safe sample records without stringifying nested lists or leaking DataFrame internals.
+  - Verifier table-intent detection no longer treats `top-level` as a top-k table request.
+  - ResponseComposer now summarizes mixed top-level item types such as dict, DataFrame, ndarray, list, and tuple.
+- Latest committed baseline remains `1837f6c7a93d03c56c5cc3d4deb2653058eaba93`; per user instruction, these final verification updates were not committed.

@@ -18,22 +18,25 @@ import {
 import { ArtifactCard } from "./ArtifactCard";
 import { Button } from "./Button";
 import { cn } from "../lib/utils";
-import type { ChatMessage, ChatTraceEvent, PendingConfirmation } from "../hooks/useChat";
+import type { ChatMessage, ChatTraceEvent, PendingClarification, PendingConfirmation } from "../hooks/useChat";
 
 type ChatThreadProps = {
   sessionId?: string | null;
   messages: ChatMessage[];
+};
+
+type PendingActionDockProps = {
   pendingConfirmation: PendingConfirmation | null;
+  pendingClarification: PendingClarification | null;
   onConfirm: () => void;
   onCancel: () => void;
+  onChooseClarification: (option: PendingClarification["options"][number]) => void;
+  onCancelClarification: () => void;
 };
 
 export function ChatThread({
   sessionId,
   messages,
-  pendingConfirmation,
-  onConfirm,
-  onCancel,
 }: ChatThreadProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
@@ -96,9 +99,6 @@ export function ChatThread({
             <AssistantMessage
               sessionId={sessionId}
               message={message}
-              pendingConfirmation={pendingConfirmation}
-              onConfirm={onConfirm}
-              onCancel={onCancel}
             />
           )}
         </motion.div>
@@ -121,6 +121,45 @@ export function ChatThread({
   );
 }
 
+export function PendingActionDock({
+  pendingConfirmation,
+  pendingClarification,
+  onConfirm,
+  onCancel,
+  onChooseClarification,
+  onCancelClarification,
+}: PendingActionDockProps) {
+  const activeAction = pendingClarification ? "clarification" : pendingConfirmation ? "confirmation" : null;
+  if (!activeAction) {
+    return null;
+  }
+
+  return (
+    <div className="border-t border-border/80 bg-white/85 px-4 pt-3 backdrop-blur">
+      <AnimatePresence mode="wait">
+        <motion.div
+          key={activeAction}
+          initial={{ opacity: 0, y: 18, scale: 0.99 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 12, scale: 0.99 }}
+          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          className="mx-auto max-w-3xl"
+        >
+          {pendingClarification ? (
+            <ClarificationCard
+              pending={pendingClarification}
+              onChoose={onChooseClarification}
+              onCancel={onCancelClarification}
+            />
+          ) : pendingConfirmation ? (
+            <ConfirmationCard pending={pendingConfirmation} onConfirm={onConfirm} onCancel={onCancel} />
+          ) : null}
+        </motion.div>
+      </AnimatePresence>
+    </div>
+  );
+}
+
 function UserMessage({ message }: { message: ChatMessage }) {
   return (
     <div className="ml-auto max-w-[82%] rounded-lg border border-teal-200 bg-teal-700 p-4 text-white shadow-lg shadow-teal-900/10">
@@ -136,15 +175,9 @@ function UserMessage({ message }: { message: ChatMessage }) {
 function AssistantMessage({
   sessionId,
   message,
-  pendingConfirmation,
-  onConfirm,
-  onCancel,
 }: {
   sessionId?: string | null;
   message: ChatMessage;
-  pendingConfirmation: PendingConfirmation | null;
-  onConfirm: () => void;
-  onCancel: () => void;
 }) {
   const isStreaming = message.status === "streaming";
   const progress = agentProgress(message);
@@ -168,10 +201,6 @@ function AssistantMessage({
 
       {message.trace.length > 0 ? (
         <TracePanel trace={message.trace} isStreaming={isStreaming} defaultOpen={isStreaming} />
-      ) : null}
-
-      {pendingConfirmation?.assistantMessageId === message.id ? (
-        <ConfirmationCard pending={pendingConfirmation} onConfirm={onConfirm} onCancel={onCancel} />
       ) : null}
 
       {message.finalAnswer ? (
@@ -558,6 +587,50 @@ function ConfirmationCard({
             <Button onClick={onConfirm}>{pending.confirmLabel || "Apply change"}</Button>
             <Button variant="secondary" onClick={onCancel}>
               {pending.cancelLabel || "Cancel"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ClarificationCard({
+  pending,
+  onChoose,
+  onCancel,
+}: {
+  pending: PendingClarification;
+  onChoose: (option: PendingClarification["options"][number]) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="rounded-lg border-2 border-sky-400 bg-white p-5 shadow-2xl shadow-slate-950/20">
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-sky-600 text-white">
+          <Sparkles className="h-5 w-5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-bold text-slate-950">{pending.title || "Clarification needed"}</p>
+          <p className="mt-2 text-sm leading-6 text-slate-700">{pending.message}</p>
+          <div className="mt-4 space-y-2">
+            {pending.options.map((option, index) => (
+              <button
+                key={option.id || option.label || index}
+                type="button"
+                className="w-full rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-left transition hover:border-sky-400 hover:bg-sky-100"
+                onClick={() => onChoose(option)}
+              >
+                <span className="block text-sm font-bold text-sky-950">{option.label}</span>
+                {option.description ? (
+                  <span className="mt-1 block text-xs leading-5 text-sky-900/70">{option.description}</span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+          <div className="mt-4 flex justify-end">
+            <Button variant="secondary" onClick={onCancel}>
+              Cancel
             </Button>
           </div>
         </div>

@@ -162,6 +162,7 @@ def _persist_stream_event(
         assistant_message.key_findings = [str(item) for item in _json_list(event.get("key_findings"))]
         assistant_message.warnings = [str(item) for item in _json_list(event.get("warnings"))]
         assistant_message.state_changed = bool(event.get("state_changed"))
+        assistant_message.pending_action = None
         assistant_message.artifact_ids = _append_many_unique(
             assistant_message.artifact_ids,
             [item for item in _json_list(event.get("artifact_ids")) if isinstance(item, str)],
@@ -169,6 +170,35 @@ def _persist_stream_event(
     elif event_type == "confirmation_required":
         assistant_message.status = "waiting_confirmation"
         event["assistant_message_id"] = assistant_message.id
+        assistant_message.pending_action = {
+            "type": "confirmation_required",
+            **{
+                key: event.get(key)
+                for key in (
+                    "confirmation_id",
+                    "title",
+                    "message",
+                    "code",
+                    "proposed_code",
+                    "mutation_summary",
+                    "operation_summary",
+                    "dataset_name",
+                    "expected_effect",
+                    "affected_count",
+                    "current_row_count",
+                    "new_row_count",
+                    "state_impact",
+                    "reversible",
+                    "rollback_note",
+                    "confirm_label",
+                    "cancel_label",
+                    "risk_level",
+                    "affected_dataset_ids",
+                    "required_confirmation_phrase",
+                )
+                if key in event
+            },
+        }
         confirmation_id = event.get("confirmation_id")
         if isinstance(confirmation_id, str):
             confirmation = db.get(PendingConfirmation, confirmation_id)
@@ -177,6 +207,15 @@ def _persist_stream_event(
                 tool_arguments["assistant_message_id"] = assistant_message.id
                 confirmation.tool_arguments = tool_arguments
                 db.add(confirmation)
+    elif event_type == "clarification_required":
+        assistant_message.status = "waiting_clarification"
+        assistant_message.final_answer = str(event.get("message") or "")
+        assistant_message.pending_action = {
+            "type": "clarification_required",
+            "title": event.get("title"),
+            "message": event.get("message"),
+            "options": event.get("options") if isinstance(event.get("options"), list) else [],
+        }
     elif event_type == "message_done":
         if assistant_message.status == "streaming":
             assistant_message.status = "done"
@@ -198,7 +237,14 @@ def _persist_stream_event(
 
 def _trace_event_from_stream(event: dict[str, Any], run_id: str) -> dict[str, Any] | None:
     event_type = str(event.get("type", "message"))
-    if event_type in {"message_started", "final_answer", "message_done", "artifact_created"}:
+    if event_type in {
+        "message_started",
+        "final_answer",
+        "message_done",
+        "artifact_created",
+        "confirmation_required",
+        "clarification_required",
+    }:
         return None
     trace: dict[str, Any] = {"id": str(uuid.uuid4()), "type": event_type}
     for key in (

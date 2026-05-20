@@ -49,6 +49,8 @@ export function buildChatTranscriptMarkdown(messages: ChatMessage[], options: Ch
       lines.push("### Final Answer", "", message.finalAnswer, "");
     } else if (message.status === "waiting_confirmation") {
       lines.push("_Assistant is waiting for confirmation._", "");
+    } else if (message.status === "waiting_clarification") {
+      lines.push("_Assistant is waiting for clarification._", "");
     } else if (message.status === "streaming") {
       lines.push("_Assistant response was still streaming when this transcript was exported._", "");
     } else if (message.status === "error") {

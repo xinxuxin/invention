@@ -25,7 +25,7 @@ import { ArtifactCard } from "../components/ArtifactCard";
 import { BranchTimeline } from "../components/BranchTimeline";
 import { ChatExportCard } from "../components/ChatExportCard";
 import { ChatInput } from "../components/ChatInput";
-import { ChatThread } from "../components/ChatThread";
+import { ChatThread, PendingActionDock } from "../components/ChatThread";
 import { CollapsibleCard } from "../components/CollapsibleCard";
 import { DatasetCard, formatPrimaryMetric } from "../components/DatasetCard";
 import { Panel } from "../components/Panel";
@@ -355,11 +355,17 @@ export function Dashboard() {
                   <ChatThread
                     sessionId={workspace.session?.id}
                     messages={chat.messages}
-                    pendingConfirmation={chat.pendingConfirmation}
-                    onConfirm={chat.confirmPending}
-                    onCancel={chat.cancelPending}
                   />
                 </div>
+
+                <PendingActionDock
+                  pendingConfirmation={chat.pendingConfirmation}
+                  pendingClarification={chat.pendingClarification}
+                  onConfirm={chat.confirmPending}
+                  onCancel={chat.cancelPending}
+                  onChooseClarification={chat.chooseClarification}
+                  onCancelClarification={chat.cancelClarification}
+                />
 
                 <div className="border-t border-border/80 bg-white/60 p-4">
                   <ChatInput

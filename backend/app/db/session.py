@@ -51,6 +51,9 @@ def _migrate_sqlite() -> None:
             "mutation_summary": "TEXT",
             "created_by_message_id": "TEXT",
         },
+        "chat_messages": {
+            "pending_action": "JSON",
+        },
     }
     with engine.begin() as connection:
         inspector = inspect(connection)

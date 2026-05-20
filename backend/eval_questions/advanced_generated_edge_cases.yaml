@@ -8,6 +8,21 @@ scenarios:
       - ask: "Clean this dataset."
       - ask: "Normalize all purchase event items into a table with customer_id, event_id, sku, name, quantity, unit_price, line_total, and export it as CSV."
       - ask: "Find possible data quality issues in this customer event dataset, but do not mutate anything. Check missing customer_id, missing event_id, negative order_total, and risk flags with missing severity."
+  - id: nested_generic_mutations
+    datasets: [nested_customer_events]
+    fresh_session: true
+    steps:
+      - ask: "keep only enterprise customers"
+        expect_confirmation: true
+      - approve_confirmation: true
+      - ask: "How many customers are in the dataset now?"
+      - ask: "Roll back to the original uploaded dataset."
+      - approve_confirmation: true
+      - ask: "remove customers with churn_risk above 0.8"
+        expect_confirmation: true
+      - approve_confirmation: true
+      - ask: "Roll back to the original uploaded dataset."
+      - approve_confirmation: true
   - id: mixed_bundle_compound_and_arrays
     datasets: [mixed_dataframe_numpy_bundle]
     fresh_session: true
@@ -15,6 +30,21 @@ scenarios:
       - ask: "Join users and orders on user_id, show revenue by country as a table, create a bar chart, and export the joined country summary as CSV."
       - ask: "Inspect user_embedding_matrix and cohort_tensor. Summarize their shapes, dtypes, and basic statistics without dumping the full arrays."
       - ask: "Join daily_metrics with users."
+  - id: mixed_bundle_generic_mutations
+    datasets: [mixed_dataframe_numpy_bundle]
+    fresh_session: true
+    steps:
+      - ask: "drop refunded orders"
+        expect_confirmation: true
+      - approve_confirmation: true
+      - ask: "How many orders are in the current dataset now?"
+      - ask: "Roll back to the original uploaded dataset."
+      - approve_confirmation: true
+      - ask: "remove orders with gross_revenue below 100"
+        expect_confirmation: true
+      - approve_confirmation: true
+      - ask: "Roll back to the original uploaded dataset."
+      - approve_confirmation: true
   - id: custom_sensor_mutation_reject_and_rollback
     datasets: [custom_sensor_fleet]
     fresh_session: true
@@ -27,6 +57,13 @@ scenarios:
       - ask: "Show me the mutation history so far."
       - ask: "Roll back to the original uploaded dataset."
       - approve_confirmation: true
+  - id: custom_sensor_generic_site_filter
+    datasets: [custom_sensor_fleet]
+    fresh_session: true
+    steps:
+      - ask: "keep only readings from Plant-A"
+      - ask: "How many sensor readings are in the current dataset?"
+      - ask: "Roll back to the original uploaded dataset."
   - id: mixed_collection_no_crash
     datasets: [mixed_top_level_collection]
     fresh_session: true

@@ -36,6 +36,7 @@ class ChatMessageRead(BaseModel):
     artifact_ids: list[str] = Field(default_factory=list)
     trace_events: list[ChatTraceEventRead] = Field(default_factory=list)
     artifacts: list[ArtifactRead] = Field(default_factory=list)
+    pending_action: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
 

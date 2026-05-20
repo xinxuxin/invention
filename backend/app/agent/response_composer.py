@@ -332,6 +332,22 @@ def _structural_findings(preview: Mapping[str, Any]) -> list[str]:
     if isinstance(top_level_keys, list) and top_level_keys:
         findings.append(f"Top-level keys: {', '.join(str(key) for key in top_level_keys[:10])}.")
 
+    top_level_items = preview.get("top_level_items")
+    if isinstance(top_level_items, list) and top_level_items:
+        item_labels: list[str] = []
+        for item in top_level_items[:10]:
+            if isinstance(item, Mapping):
+                label = str(item.get("type") or item.get("kind") or item.get("name") or "").strip()
+                count = item.get("count")
+                if label and isinstance(count, (int, float)) and not isinstance(count, bool) and int(count) > 1:
+                    label = f"{label} x{int(count):,}"
+                if label:
+                    item_labels.append(label)
+            else:
+                item_labels.append(str(item))
+        if item_labels:
+            findings.append(f"Top-level items include {', '.join(item_labels)}.")
+
     length = (
         preview.get("length")
         or preview.get("object_length")

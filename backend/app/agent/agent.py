@@ -25,9 +25,18 @@ from app.runtime.python_executor import (
     ExecutionResult,
     PythonExecutor,
     _execution_artifact_read,
+    fast_get_field,
     flatten_records_at_path,
     object_to_record,
     to_dataframe,
+)
+from app.services.mutation_intents import normalize_country_value, parse_country_filter_mutation
+from app.services.optimized_mutations import (
+    analyze_mutation_impact,
+    confirmation_metadata_for_spec,
+    operation_summary_for_spec,
+    parse_mutation_request,
+    pseudocode_for_spec,
 )
 from app.agent.types import VerificationResult
 from app.services.export import export_dataset_csv
@@ -370,13 +379,12 @@ class CodingAgent:
 
         clarification = _clarification_for_ambiguous_destructive_request(request.message)
         if clarification:
-            yield {"type": "trace", "message": "Clarification needed before making a destructive data change."}
             yield {
-                "type": "final_answer",
-                "answer": clarification,
+                "type": "clarification_required",
+                "title": clarification["title"],
+                "message": clarification["message"],
+                "options": clarification["options"],
                 "state_changed": False,
-                "highlights": [],
-                "warnings": ["Clarification is required before a potentially destructive mutation."],
             }
             yield {"type": "message_done"}
             return
@@ -922,6 +930,15 @@ class CodingAgent:
             "affected_count": confirmation.tool_arguments.get("affected_count"),
             "current_row_count": confirmation.tool_arguments.get("current_row_count"),
             "new_row_count": confirmation.tool_arguments.get("new_row_count"),
+            "field": confirmation.tool_arguments.get("field"),
+            "field_path": confirmation.tool_arguments.get("field_path"),
+            "target_path": confirmation.tool_arguments.get("target_path"),
+            "operator": confirmation.tool_arguments.get("operator"),
+            "value": confirmation.tool_arguments.get("value"),
+            "mode": confirmation.tool_arguments.get("mode"),
+            "keep_value": confirmation.tool_arguments.get("keep_value"),
+            "removed_value_counts": confirmation.tool_arguments.get("removed_value_counts"),
+            "kept_value_counts": confirmation.tool_arguments.get("kept_value_counts"),
             "state_impact": "This will create a new version on the current branch.",
             "reversible": True,
             "rollback_note": "You can rollback to the previous version from mutation history.",
@@ -946,8 +963,35 @@ class CodingAgent:
         request: ChatStreamRequest,
     ) -> list[dict[str, Any]] | None:
         lowered = request.message.lower().strip()
+        clarification = _clarification_for_ambiguous_destructive_request(request.message)
+        if clarification:
+            return [
+                {
+                    "type": "clarification_required",
+                    "title": clarification["title"],
+                    "message": clarification["message"],
+                    "options": clarification["options"],
+                    "state_changed": False,
+                }
+            ]
+
+        if _is_add_filing_year_request(lowered):
+            return self._confirm_add_filing_year(session_id, request)
+
+        optimized_events = self._optimized_mutation_shortcut(session_id, request)
+        if optimized_events is not None:
+            return optimized_events
+
+        country_filter = parse_country_filter_mutation(request.message)
+        if country_filter is not None:
+            return self._confirm_country_filter(session_id, request, country_filter.keep_value)
+
         if _is_full_delete_request(lowered):
             return self._confirm_delete_all(session_id, request)
+
+        first_match = re.search(r"\b(?:delete|remove|drop)\s+first\s+(\d+)\s+(?:entries|rows|records)\b", lowered)
+        if first_match:
+            return self._confirm_delete_first_n(session_id, request, int(first_match.group(1)))
 
         last_match = re.search(r"\b(?:delete|remove|drop)\s+last\s+(\d+)\s+(?:entries|rows|records)\b", lowered)
         if last_match:
@@ -969,6 +1013,267 @@ class CodingAgent:
             return self._confirm_remove_battery_below(session_id, request, threshold)
 
         return None
+
+    def _optimized_mutation_shortcut(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+    ) -> list[dict[str, Any]] | None:
+        dataset = self._active_dataset_for_request(session_id, request.active_dataset_id)
+        if dataset is None:
+            return None
+        try:
+            value = load_pickle(Path(dataset.current_snapshot_path))
+        except Exception:
+            return None
+
+        outcome = parse_mutation_request(
+            request.message,
+            value,
+            target_dataset_id=dataset.id,
+            target_dataset_name=dataset.dataset_key or dataset.original_filename,
+        )
+        if outcome.clarification:
+            return [
+                {
+                    "type": "clarification_required",
+                    "title": str(outcome.clarification.get("title") or "Clarification needed"),
+                    "message": str(outcome.clarification.get("message") or "Please clarify the mutation rule."),
+                    "options": list(outcome.clarification.get("options") or []),
+                    "state_changed": False,
+                }
+            ]
+        if outcome.spec is None:
+            return None
+
+        spec = outcome.spec
+        try:
+            impact = analyze_mutation_impact(value, spec)
+        except Exception as exc:
+            return [
+                {"type": "trace", "message": "Detected an optimized mutation intent, but impact analysis could not be completed."},
+                {
+                    "type": "final_answer",
+                    "answer": (
+                        f"I could not safely prepare this optimized mutation: {exc}. "
+                        "The dataset was left unchanged.\n\n"
+                        "**State changed:** No"
+                    ),
+                    "state_changed": False,
+                },
+            ]
+
+        if impact.affected_count == 0:
+            field_text = f" for `{spec.field_path}`" if spec.field_path else ""
+            if spec.kind == "remove_missing_field":
+                answer = (
+                    f"I scanned all {impact.current_count:,} records and found **0** records with missing, "
+                    f"null, or blank `{spec.field_path}` values.\n\n"
+                    "**State changed:** No"
+                )
+            else:
+                answer = (
+                    f"Full scan found **0** matching records{field_text}; no mutation was applied.\n\n"
+                    "**State changed:** No"
+                )
+            return [
+                {"type": "trace", "message": "Detected optimized mutation intent and scanned the target collection."},
+                {
+                    "type": "final_answer",
+                    "answer": answer,
+                    "state_changed": False,
+                },
+            ]
+
+        metadata = confirmation_metadata_for_spec(spec, impact)
+        if spec.kind == "delete_all_records":
+            metadata["required_confirmation_phrase"] = "Yes, delete all records"
+        operation_summary = operation_summary_for_spec(spec)
+        risk_level = "high" if spec.kind in {"delete_all_records", "delete_first_n", "delete_last_n", "filter_records", "filter_records_at_path"} else "medium"
+        confirmation = self._direct_confirmation(
+            session_id=session_id,
+            request=request,
+            dataset=dataset,
+            code=pseudocode_for_spec(spec),
+            operation_summary=operation_summary,
+            risk_level=risk_level,
+            metadata=metadata,
+        )
+        target_text = f" at `{spec.target_path}`" if spec.target_path else ""
+        return [
+            {"type": "trace", "message": "Detected optimized field/path mutation intent."},
+            {"type": "trace", "message": "Full scan completed; confirmation is required before changing data."},
+            self._confirmation_event(
+                confirmation,
+                message=(
+                    f"{operation_summary}{target_text}. This affects {impact.affected_count:,} of "
+                    f"{impact.current_count:,} records and will create a new version that can be rolled back."
+                ),
+            ),
+        ]
+
+    def _confirm_country_filter(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+        keep_value: str,
+    ) -> list[dict[str, Any]]:
+        dataset = self._active_dataset_for_request(session_id, request.active_dataset_id)
+        if dataset is None:
+            return [{"type": "error", "message": "No active dataset is available for mutation."}]
+        value = load_pickle(Path(dataset.current_snapshot_path))
+        if not _supports_safe_direct_sequence_mutation(value):
+            return [
+                {"type": "trace", "message": "Checked whether the active object supports optimized country filtering."},
+                {
+                    "type": "final_answer",
+                    "answer": (
+                        "I cannot safely filter this object type by country with the optimized mutator. "
+                        "The dataset was left unchanged.\n\n"
+                        "**State changed:** No"
+                    ),
+                    "state_changed": False,
+                },
+            ]
+        stats = _country_filter_stats(value, keep_value)
+        current_count = stats["current_row_count"]
+        affected_count = stats["affected_count"]
+        new_count = stats["new_row_count"]
+        if affected_count == 0:
+            return [
+                {"type": "trace", "message": "Scanned the full dataset for country values..."},
+                {
+                    "type": "final_answer",
+                    "answer": (
+                        f"Full scan found **0** non-{keep_value} records. No mutation was applied.\n\n"
+                        "**State changed:** No"
+                    ),
+                    "state_changed": False,
+                },
+            ]
+
+        code = "\n".join(
+            [
+                f"keep_value = {keep_value!r}",
+                "if isinstance(data, pd.DataFrame):",
+                "    data = data[data['country'].astype(str).str.upper() == keep_value].copy()",
+                "else:",
+                "    data = [item for item in data if fast_get_field(item, 'country') == keep_value]",
+            ]
+        )
+        confirmation = self._direct_confirmation(
+            session_id=session_id,
+            request=request,
+            dataset=dataset,
+            code=code,
+            operation_summary=f"Delete all non-{keep_value} records and keep only {keep_value} records",
+            risk_level="high",
+            metadata={
+                "operation_kind": "filter_by_field",
+                "field": "country",
+                "operator": "eq",
+                "keep_value": keep_value,
+                "delete_inverse": True,
+                "current_row_count": current_count,
+                "new_row_count": new_count,
+                "affected_count": affected_count,
+                "removed_value_counts": stats["removed_value_counts"],
+            },
+        )
+        return [
+            {"type": "trace", "message": "Confirmation required before deleting records."},
+            self._confirmation_event(
+                confirmation,
+                message=(
+                    f"This will delete all records whose `country` is not `{keep_value}` and keep only `{keep_value}` "
+                    "records. Please confirm before I apply it."
+                ),
+            ),
+        ]
+
+    def _confirm_add_filing_year(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+    ) -> list[dict[str, Any]]:
+        dataset = self._active_dataset_for_request(session_id, request.active_dataset_id)
+        if dataset is None:
+            return [{"type": "error", "message": "No active dataset is available for mutation."}]
+        value = load_pickle(Path(dataset.current_snapshot_path))
+        current_count, has_filing_date = _scan_filing_date_field(value)
+        if not has_filing_date:
+            return [
+                {"type": "trace", "message": "Scanned the active dataset for a filing_date field..."},
+                {
+                    "type": "final_answer",
+                    "answer": (
+                        "I scanned the active dataset and could not find a `filing_date` field to derive "
+                        "`filing_year` from. No mutation was applied.\n\n"
+                        "**State changed:** No"
+                    ),
+                    "state_changed": False,
+                },
+            ]
+
+        code = "\n".join(
+            [
+                "def _filing_year_from_value(value):",
+                "    if value is None:",
+                "        return None",
+                "    if hasattr(value, 'year'):",
+                "        return int(value.year)",
+                "    parsed = pd.to_datetime(value, errors='coerce')",
+                "    return None if pd.isna(parsed) else int(parsed.year)",
+                "if isinstance(data, pd.DataFrame):",
+                "    current_count = len(data)",
+                "    data = data.copy()",
+                "    data['filing_year'] = pd.to_datetime(data['filing_date'], errors='coerce').dt.year.astype('Int64')",
+                "else:",
+                "    current_count = len(data) if hasattr(data, '__len__') else len(objects_to_records(data, limit=None))",
+                "    updated = []",
+                "    for item in data:",
+                "        record = object_to_record(item)",
+                "        filing_year = _filing_year_from_value(record.get('filing_date'))",
+                "        if isinstance(item, dict):",
+                "            next_item = dict(item)",
+                "            next_item['filing_year'] = filing_year",
+                "        else:",
+                "            import copy",
+                "            next_item = copy.copy(item)",
+                "            try:",
+                "                setattr(next_item, 'filing_year', filing_year)",
+                "            except Exception:",
+                "                next_item = dict(record)",
+                "                next_item['filing_year'] = filing_year",
+                "        updated.append(next_item)",
+                "    data = tuple(updated) if isinstance(data, tuple) else updated",
+                "RESULT = {'full_scan': True, 'derived_field': 'filing_year', 'current_row_count': current_count, 'new_row_count': current_count, 'affected_count': current_count}",
+            ]
+        )
+        confirmation = self._direct_confirmation(
+            session_id=session_id,
+            request=request,
+            dataset=dataset,
+            code=code,
+            operation_summary="Add derived field `filing_year` based on `filing_date`",
+            risk_level="medium",
+            metadata={
+                "operation_kind": "add_filing_year",
+                "current_row_count": current_count,
+                "new_row_count": current_count,
+                "affected_count": current_count,
+            },
+        )
+        return [
+            {"type": "trace", "message": "Confirmation required before adding a derived field to the dataset."},
+            self._confirmation_event(
+                confirmation,
+                message=(
+                    "Adding `filing_year` changes every record in the active dataset. "
+                    "Please confirm before I save this as a new version."
+                ),
+            ),
+        ]
 
     def _confirm_remove_battery_below(
         self,
@@ -1140,6 +1445,60 @@ class CodingAgent:
                     "This will delete all records from the current working dataset. This cannot be treated as a cleanup rule. "
                     "Confirm only if you explicitly want the working dataset to become empty."
                 ),
+            ),
+        ]
+
+    def _confirm_delete_first_n(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+        count: int,
+    ) -> list[dict[str, Any]]:
+        dataset = self._active_dataset_for_request(session_id, request.active_dataset_id)
+        if dataset is None:
+            return [{"type": "error", "message": "No active dataset is available for deletion."}]
+        value = load_pickle(Path(dataset.current_snapshot_path))
+        current_count = len(value) if hasattr(value, "__len__") else len(to_dataframe(value, limit=None))
+        delete_count = min(count, current_count)
+        new_count = max(0, current_count - delete_count)
+        code = "\n".join(
+            [
+                f"delete_count = {delete_count}",
+                "current_count = len(data) if hasattr(data, '__len__') else len(to_dataframe(data, limit=None))",
+                "if delete_count <= 0:",
+                "    RESULT = {'full_scan': True, 'deleted_count': 0, 'current_row_count': current_count, 'new_row_count': current_count}",
+                "elif isinstance(data, pd.DataFrame):",
+                "    data = data.iloc[delete_count:].copy()",
+                "elif isinstance(data, list):",
+                "    data = data[delete_count:]",
+                "elif isinstance(data, tuple):",
+                "    data = list(data[delete_count:])",
+                "else:",
+                "    frame = to_dataframe(data, limit=None)",
+                "    data = frame.iloc[delete_count:].copy()",
+                "RESULT = {'full_scan': True, 'deleted_count': delete_count, 'current_row_count': current_count, 'new_row_count': len(data)}",
+            ]
+        )
+        confirmation = self._direct_confirmation(
+            session_id=session_id,
+            request=request,
+            dataset=dataset,
+            code=code,
+            operation_summary=f"Delete the first {delete_count:,} records from the current working dataset",
+            risk_level="high",
+            metadata={
+                "operation_kind": "delete_first_n",
+                "delete_count": delete_count,
+                "current_row_count": current_count,
+                "new_row_count": new_count,
+                "affected_count": delete_count,
+            },
+        )
+        return [
+            {"type": "trace", "message": "Confirmation required before deleting records."},
+            self._confirmation_event(
+                confirmation,
+                message="Deleting records changes the active dataset state. Please confirm before I apply it.",
             ),
         ]
 
@@ -2020,13 +2379,25 @@ def _active_dataset(datasets: Sequence[Dataset], active_dataset_id: str | None) 
     return next((dataset for dataset in datasets if dataset.id == active_dataset_id), None)
 
 
-def _clarification_for_ambiguous_destructive_request(message: str) -> str | None:
+def _clarification_for_ambiguous_destructive_request(message: str) -> dict[str, Any] | None:
     lowered = message.lower()
     if "most important identifier" in lowered:
-        return (
-            "I need one clarification before changing data: which identifier field should define "
-            "the missing-value drop?\n\n**State changed:** No"
-        )
+        return {
+            "title": "Clarification needed",
+            "message": "Which identifier field should define the missing-value drop?",
+            "options": [
+                {
+                    "id": "doc_number",
+                    "label": "Use doc_number",
+                    "message": "Use doc_number as the identifier field for the missing-value drop.",
+                },
+                {
+                    "id": "country_doc_kind_title",
+                    "label": "Use country/doc_number/kind/title",
+                    "message": "Use country, doc_number, kind, and title as the identifier fields for the missing-value drop.",
+                },
+            ],
+        }
     ambiguous_phrases = (
         "clean this dataset",
         "remove bad records",
@@ -2038,18 +2409,38 @@ def _clarification_for_ambiguous_destructive_request(message: str) -> str | None
         "clean up the data",
     )
     if any(phrase in lowered for phrase in ambiguous_phrases):
-        return (
-            "I need one clarification before making a destructive data change: what exact rule "
-            "should define a bad record?\n\n"
-            "Options I can apply:\n"
-            "1. Remove records with missing title.\n"
-            "2. Remove duplicate records by country/doc_number/kind/title.\n"
-            "3. Remove invalid date records.\n"
-            "4. Remove records with missing country/doc_number.\n"
-            "5. Filter by status, country, or date.\n\n"
-            "Please choose the rule you want me to apply.\n\n"
-            "**State changed:** No"
-        )
+        return {
+            "title": "Choose a cleaning rule",
+            "message": "I need one clarification before making a destructive data change: what exact rule should define a bad record?",
+            "options": [
+                {
+                    "id": "missing_title",
+                    "label": "Remove records with missing title",
+                    "message": "Remove records with missing title.",
+                },
+                {
+                    "id": "duplicates",
+                    "label": "Remove duplicate records",
+                    "description": "Use country/doc_number/kind/title as the duplicate key.",
+                    "message": "Remove duplicate records based on country, doc_number, kind, and title, but ask for confirmation first.",
+                },
+                {
+                    "id": "invalid_dates",
+                    "label": "Remove invalid date records",
+                    "message": "Remove invalid date records, but ask for confirmation first.",
+                },
+                {
+                    "id": "missing_country_doc_number",
+                    "label": "Remove missing country/doc_number",
+                    "message": "Remove records with missing country or missing doc_number, but ask for confirmation first.",
+                },
+                {
+                    "id": "filter_status_country_date",
+                    "label": "Filter by status/country/date",
+                    "message": "Filter by status, country, or date. Ask me which status, country, or date range to keep before changing data.",
+                },
+            ],
+        }
     return None
 
 
@@ -2140,6 +2531,57 @@ def _scan_empty_title(value: Any) -> tuple[int, int, bool]:
     return current_count, affected_count, True
 
 
+def _scan_filing_date_field(value: Any) -> tuple[int, bool]:
+    if isinstance(value, pd.DataFrame):
+        return int(len(value)), "filing_date" in value.columns
+
+    if isinstance(value, (list, tuple)):
+        current_count = len(value)
+        return current_count, any("filing_date" in object_to_record(item) for item in value[:50])
+
+    frame = to_dataframe(value, limit=None)
+    return int(len(frame)), "filing_date" in frame.columns
+
+
+def _country_filter_stats(value: Any, keep_value: str) -> dict[str, Any]:
+    if isinstance(value, pd.DataFrame):
+        if "country" not in value.columns:
+            return {
+                "current_row_count": int(len(value)),
+                "new_row_count": 0,
+                "affected_count": int(len(value)),
+                "removed_value_counts": {"Unknown": int(len(value))},
+            }
+        normalized = value["country"].map(normalize_country_value)
+        keep_mask = normalized.eq(keep_value)
+        removed_counts = normalized.loc[~keep_mask].fillna("Unknown").value_counts(dropna=False).to_dict()
+        current_count = int(len(value))
+        kept_count = int(keep_mask.sum())
+        return {
+            "current_row_count": current_count,
+            "new_row_count": kept_count,
+            "affected_count": current_count - kept_count,
+            "removed_value_counts": {str(key): int(count) for key, count in removed_counts.items()},
+        }
+
+    current_count = len(value) if hasattr(value, "__len__") else 0
+    kept_count = 0
+    removed_counts: dict[str, int] = {}
+    for item in value:
+        normalized = normalize_country_value(fast_get_field(item, "country"))
+        if normalized == keep_value:
+            kept_count += 1
+        else:
+            key = normalized or "Unknown"
+            removed_counts[key] = removed_counts.get(key, 0) + 1
+    return {
+        "current_row_count": int(current_count),
+        "new_row_count": int(kept_count),
+        "affected_count": int(current_count - kept_count),
+        "removed_value_counts": removed_counts,
+    }
+
+
 def _numeric_below(value: Any, threshold: float) -> bool:
     try:
         return float(value) < threshold
@@ -2161,6 +2603,16 @@ def _is_full_delete_request(message: str) -> bool:
         "drop all records",
     )
     return any(phrase in lowered for phrase in phrases)
+
+
+def _is_add_filing_year_request(message: str) -> bool:
+    lowered = message.lower()
+    return (
+        "filing_year" in lowered
+        and "filing_date" in lowered
+        and any(term in lowered for term in ("add", "derive", "derived", "create"))
+        and any(term in lowered for term in ("persist", "save", "mutate", "add"))
+    )
 
 
 def _supports_safe_direct_sequence_mutation(value: Any) -> bool:
@@ -2671,9 +3123,24 @@ def _common_table_export_code(message: str) -> str | None:
                 f"request_text = {request_text}",
                 "summary = summarize_structure(data)",
                 "top_keys = summary.get('top_level_keys') or summary.get('keys') or []",
+                "top_items = summary.get('top_level_items') or []",
                 "collections = summary.get('record_collections_detected') or []",
                 "collection_paths = [str(item.get('path')) for item in collections[:8] if isinstance(item, dict)]",
-                "RESULT = {'summary': 'Active dataset structure inspected.', 'object_type': summary.get('object_type'), 'top_level_keys': top_keys, 'record_collections': collection_paths, 'tables_detected': summary.get('tables_detected', []), 'arrays_detected': summary.get('arrays_detected', []), 'state_changed': False}",
+                "sample_records = []",
+                "try:",
+                "    if isinstance(data, pd.DataFrame):",
+                "        sample_records = data.head(2).to_dict('records')",
+                "    elif isinstance(data, (list, tuple)) and data:",
+                "        for item in list(data)[:5]:",
+                "            record = object_to_record(item)",
+                "            if isinstance(record, dict) and record and not any(str(key).startswith('_') for key in record):",
+                "                sample_records.append(record)",
+                "            if len(sample_records) >= 2:",
+                "                break",
+                "except Exception:",
+                "    sample_records = []",
+                "length = len(data) if hasattr(data, '__len__') else None",
+                "RESULT = {'summary': 'Active dataset structure inspected.', 'object_type': summary.get('object_type'), 'length': length, 'top_level_keys': top_keys, 'top_level_items': top_items, 'record_collections': collection_paths, 'record_collections_detected': collections, 'likely_primary_records': summary.get('likely_primary_records', []), 'tables_detected': summary.get('tables_detected', []), 'arrays_detected': summary.get('arrays_detected', []), 'sample_records': sample_records, 'state_changed': False}",
             ]
         )
     if "sensor" in prompt and "reading" in prompt and "how many" in prompt:

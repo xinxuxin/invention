@@ -6,6 +6,8 @@ from typing import Any
 
 from app.agent.types import LLMVerificationResult, VerificationResult
 from app.runtime.python_executor import ExecutionArtifact, ExecutionResult
+from app.services.mutation_intents import parse_country_filter_mutation
+from app.services.optimized_mutations import looks_like_optimized_mutation_prompt
 
 TABLE_MARKERS = (
     "table",
@@ -149,6 +151,20 @@ class ResultVerifier:
                 invalid_helper_reason,
                 instruction,
                 hard_fail=False,
+            )
+
+        if parse_country_filter_mutation(user_message) is not None and execution_result is not None:
+            return _retry(
+                "Country filter mutation reached generic Python execution.",
+                "Country filter mutations should be handled by optimized mutation preflight, not generic Python execution.",
+                hard_fail=True,
+            )
+
+        if looks_like_optimized_mutation_prompt(user_message) and execution_result is not None and confirmation_status != "approved":
+            return _retry(
+                "Clear destructive mutation reached generic Python execution.",
+                "Clear field/path mutations should be handled by optimized MutationSpec preflight with request_confirmation-style confirmation, not generic Python execution.",
+                hard_fail=True,
             )
 
         if execution_result and not execution_result.ok:
@@ -365,7 +381,14 @@ def merge_verification_results(
 def asks_for_table(message: str) -> bool:
     if "list all" in message and not any(marker in message for marker in ("table", "tabular", "rows", "preview", "with shapes")):
         return False
-    return any(marker in message for marker in TABLE_MARKERS)
+    for marker in TABLE_MARKERS:
+        if marker == "top":
+            if re.search(r"\btop\s+\w+", message):
+                return True
+            continue
+        if re.search(rf"\b{re.escape(marker)}\b", message):
+            return True
+    return False
 
 
 def asks_for_chart(message: str) -> bool:

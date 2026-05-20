@@ -185,6 +185,7 @@ export type PersistedChatMessage = {
   artifact_ids?: string[];
   trace_events?: PersistedChatTraceEvent[];
   artifacts?: ExecutionArtifact[];
+  pending_action?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
@@ -242,6 +243,18 @@ export type ChatStreamEvent =
       cancel_label?: string | null;
       risk_level?: "low" | "medium" | "high" | string;
       affected_dataset_ids?: string[];
+    }
+  | {
+      type: "clarification_required";
+      title?: string | null;
+      message: string;
+      options: Array<{
+        id?: string;
+        label: string;
+        description?: string | null;
+        message?: string | null;
+      }>;
+      state_changed?: boolean;
     }
   | { type: "artifact_created"; artifact: ExecutionArtifact }
   | {

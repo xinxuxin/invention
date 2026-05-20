@@ -15,6 +15,8 @@ from app.core.config import get_settings
 from app.db.session import get_session
 from app.main import app
 from app.models.entities import new_id
+from app.runtime.python_executor import fast_get_field
+from app.storage.files import load_pickle
 
 
 class DummyMissingPatent:
@@ -207,6 +209,63 @@ def test_destructive_mutation_requires_confirmation(client: TestClient) -> None:
     assert confirmation["affected_dataset_ids"] == [dataset_id]
     assert not any(event["type"] == "code_result_summary" for event in events)
     assert events[-1]["type"] == "message_done"
+
+
+def test_ambiguous_destructive_prompt_streams_clarification_options_not_trace(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Remove bad records.", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    clarification = next(event for event in events if event["type"] == "clarification_required")
+
+    assert response.status_code == 200
+    assert clarification["title"] == "Choose a cleaning rule"
+    assert "what exact rule" in clarification["message"]
+    assert [option["id"] for option in clarification["options"][:2]] == ["missing_title", "duplicates"]
+    assert not any(event["type"] == "final_answer" for event in events)
+    assert events[-1]["type"] == "message_done"
+
+    messages = client.get(f"/api/sessions/{session_id}/messages").json()["messages"]
+    assistant = messages[-1]
+    assert assistant["status"] == "waiting_clarification"
+    assert assistant["final_answer"] == clarification["message"]
+    assert assistant["pending_action"]["type"] == "clarification_required"
+    assert assistant["pending_action"]["options"][0]["id"] == "missing_title"
+    assert not any(event["type"] in {"confirmation_required", "clarification_required"} for event in assistant["trace_events"])
+
+
+def test_confirmation_required_is_not_persisted_as_trace(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "execute_python",
+                {
+                    "code": "data.drop(columns=['value'], inplace=True)",
+                    "mutates_state": True,
+                    "mutation_summary": "Drop value column",
+                },
+            )
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Drop the value column", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    assert any(event["type"] == "confirmation_required" for event in events)
+    messages = client.get(f"/api/sessions/{session_id}/messages").json()["messages"]
+    assistant = messages[-1]
+    assert assistant["status"] == "waiting_confirmation"
+    assert assistant["pending_action"]["type"] == "confirmation_required"
+    assert assistant["pending_action"]["confirmation_id"]
+    assert not any(event["type"] == "confirmation_required" for event in assistant["trace_events"])
 
 
 def test_approving_pending_confirmation_executes_and_versions_dataset(client: TestClient) -> None:
@@ -786,18 +845,15 @@ def test_ambiguous_destructive_prompt_asks_clarification_without_python(client: 
         json={"message": "Remove bad records.", "active_dataset_id": dataset_id},
     )
     events = _parse_sse(response.text)
-    final = events[-2]
+    clarification = events[-2]
 
     assert response.status_code == 200
     assert fake.calls == 0
-    assert any(
-        event["type"] == "trace" and "Clarification needed" in event.get("message", "")
-        for event in events
-    )
     assert not any(event["type"] == "code_started" for event in events)
-    assert final["type"] == "final_answer"
-    assert "Please choose the rule" in final["answer"]
-    assert final["state_changed"] is False
+    assert clarification["type"] == "clarification_required"
+    assert "clarification" in clarification["message"].lower()
+    assert any("missing title" in option["label"].lower() for option in clarification["options"])
+    assert clarification["state_changed"] is False
 
 
 def test_clean_dataset_prompt_asks_clarification_without_python(client: TestClient) -> None:
@@ -814,7 +870,8 @@ def test_clean_dataset_prompt_asks_clarification_without_python(client: TestClie
     assert response.status_code == 200
     assert fake.calls == 0
     assert not any(event["type"] == "code_result_summary" for event in events)
-    assert "missing title" in events[-2]["answer"].lower()
+    assert events[-2]["type"] == "clarification_required"
+    assert any("missing title" in option["label"].lower() for option in events[-2]["options"])
 
 
 def test_specific_destructive_prompt_can_proceed_to_confirmation(client: TestClient) -> None:
@@ -881,6 +938,188 @@ def test_delete_last_entries_shortcut_confirms_and_approval_mutates(client: Test
     assert dataset_response.json()["profile"]["shape"] == [1, 2]
 
 
+def test_add_filing_year_shortcut_confirms_and_approval_mutates_without_model(client: TestClient) -> None:
+    session_response = client.post("/api/sessions", json={"name": "Derived field test"})
+    assert session_response.status_code == 201
+    session_id = session_response.json()["id"]
+    dataset_id = _upload_pickle(client, session_id, "patents.pkl", _softbank_patent_dataset())
+    fake = ScriptedModelClient([_tool_response("execute_python", {"code": "raise RuntimeError('should not run')"})])
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={
+            "message": "Add a derived field called filing_year based on filing_date and persist it.",
+            "active_dataset_id": dataset_id,
+        },
+    )
+    events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
+
+    assert response.status_code == 200
+    assert fake.calls == 0
+    assert confirmation["operation_summary"] == "Add derived field `filing_year` based on `filing_date`"
+    assert confirmation["current_row_count"] == 2
+    assert confirmation["new_row_count"] == 2
+    assert confirmation["affected_count"] == 2
+
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+
+    assert approve_response.status_code == 200
+    final_answer = next(event for event in approve_response.json()["events"] if event["type"] == "final_answer")
+    assert final_answer["state_changed"] is True
+    assert "Row count remains 2" in final_answer["answer"]
+    dataset_response = client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}")
+    saved = load_pickle(Path(dataset_response.json()["current_version"]["snapshot_path"]))
+    assert [getattr(item, "filing_year", None) for item in saved] == [2019, 2017]
+
+
+def test_legacy_filing_year_confirmation_uses_optimized_approval(client: TestClient) -> None:
+    session_response = client.post("/api/sessions", json={"name": "Legacy confirmation test"})
+    assert session_response.status_code == 201
+    session_id = session_response.json()["id"]
+    dataset_id = _upload_pickle(client, session_id, "patents.pkl", _softbank_patent_dataset())
+    slow_code = "\n".join(
+        [
+            "from datetime import datetime",
+            "new_data = []",
+            "for entry in data:",
+            "    rec = object_to_record(entry)",
+            "    filing_date = rec.get('filing_date')",
+            "    rec['filing_year'] = filing_date.year if isinstance(filing_date, datetime) else None",
+            "    new_data.append(rec)",
+            "datasets['patents'] = new_data",
+        ]
+    )
+    fake = ScriptedModelClient(
+        [
+            _tool_response(
+                "request_confirmation",
+                {
+                    "message": "Confirm adding filing_year.",
+                    "code": slow_code,
+                    "mutation_summary": "Add a derived 'filing_year' field to each record and persist in the dataset",
+                },
+            )
+        ]
+    )
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={
+            "message": "Add a derived field called filing_year based on filing_date and persist it.",
+            "active_dataset_id": dataset_id,
+        },
+    )
+    events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
+
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+
+    assert approve_response.status_code == 200
+    approve_events = approve_response.json()["events"]
+    assert any(
+        event["type"] == "trace" and "optimized dataset mutation" in event["message"]
+        for event in approve_events
+    )
+    assert not any(event["type"] == "code_started" for event in approve_events)
+    dataset_response = client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}")
+    saved = load_pickle(Path(dataset_response.json()["current_version"]["snapshot_path"]))
+    assert [getattr(item, "filing_year", None) for item in saved] == [2019, 2017]
+
+
+def test_delete_first_entries_shortcut_confirms_and_approval_mutates(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient([_tool_response("execute_python", {"code": "raise RuntimeError('should not run')"})])
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "delete first 2 entries", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
+
+    assert fake.calls == 0
+    assert confirmation["operation_summary"] == "Delete the first 2 records from the current working dataset"
+    assert confirmation["current_row_count"] == 3
+    assert confirmation["new_row_count"] == 1
+    assert confirmation["affected_count"] == 2
+
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+
+    assert approve_response.status_code == 200
+    result_event = next(event for event in approve_response.json()["events"] if event["type"] == "code_result_summary")
+    assert result_event["ok"] is True
+    dataset_response = client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}")
+    assert dataset_response.json()["profile"]["shape"] == [1, 2]
+
+
+def test_country_filter_shortcut_confirms_reject_and_approve_without_python(client: TestClient) -> None:
+    session_response = client.post("/api/sessions", json={"name": "Country filter test"})
+    assert session_response.status_code == 201
+    session_id = session_response.json()["id"]
+    records = [
+        DummyMissingPatent(country="JP", title="One"),
+        DummyMissingPatent(country="CN", title="Two"),
+        DummyMissingPatent(country="JP", title="Three"),
+        DummyMissingPatent(country="US", title="Four"),
+    ]
+    dataset_id = _upload_pickle(client, session_id, "countries.pkl", records)
+    fake = ScriptedModelClient([_tool_response("execute_python", {"code": "raise RuntimeError('should not run')"})])
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "delete all non japan entries", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
+
+    assert fake.calls == 0
+    assert confirmation["operation_summary"] == "Delete all non-JP records and keep only JP records"
+    assert confirmation["field"] == "country"
+    assert confirmation["keep_value"] == "JP"
+    assert confirmation["current_row_count"] == 4
+    assert confirmation["new_row_count"] == 2
+    assert confirmation["affected_count"] == 2
+    assert confirmation["removed_value_counts"] == {"CN": 1, "US": 1}
+
+    reject_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/reject",
+    )
+    assert reject_response.status_code == 200
+    assert client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}").json()["profile"]["length"] == 4
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "keep only JP records", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+    approve_events = approve_response.json()["events"]
+    assert approve_response.status_code == 200
+    assert any(
+        event["type"] == "trace" and "optimized dataset mutation" in event["message"]
+        for event in approve_events
+    )
+    assert not any(event["type"] == "code_started" for event in approve_events)
+    dataset_response = client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}")
+    assert dataset_response.json()["profile"]["length"] == 2
+    saved = load_pickle(Path(dataset_response.json()["current_version"]["snapshot_path"]))
+    assert [fast_get_field(item, "country") for item in saved] == ["JP", "JP"]
+
+
 def test_delete_everything_requires_phrase_and_rolls_back(client: TestClient) -> None:
     session_id, dataset_id = _create_dataset(client)
     fake = ScriptedModelClient([_tool_response("execute_python", {"code": "raise RuntimeError('should not run')"})])
@@ -943,7 +1182,7 @@ def test_reject_delete_everything_leaves_dataset_unchanged(client: TestClient) -
     assert client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}").json()["profile"]["shape"] == [3, 2]
 
 
-def test_custom_object_low_battery_mutation_is_clear_unsupported_noop(client: TestClient) -> None:
+def test_custom_object_low_battery_mutation_uses_generic_optimized_path(client: TestClient) -> None:
     class SensorFleet:
         def __init__(self) -> None:
             self.sensors = [{"readings": [{"battery_pct": 10}, {"battery_pct": 90}]}]
@@ -957,11 +1196,21 @@ def test_custom_object_low_battery_mutation_is_clear_unsupported_noop(client: Te
         json={"message": "Remove readings with battery_pct below 80, but ask for confirmation first.", "active_dataset_id": dataset_id},
     )
     events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
 
-    assert not any(event["type"] == "confirmation_required" for event in events)
-    assert events[-2]["type"] == "final_answer"
-    assert events[-2]["state_changed"] is False
-    assert "custom object" in events[-2]["answer"].lower()
+    assert not any(event["type"] == "code_started" for event in events)
+    assert confirmation["target_path"] == "sensors.readings"
+    assert confirmation["field_path"] == "battery_pct"
+    assert confirmation["affected_count"] == 1
+    approve = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+    assert approve.status_code == 200
+    final = next(event for event in approve.json()["events"] if event["type"] == "final_answer")
+    assert final["state_changed"] is True
+    dataset_response = client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}")
+    saved = load_pickle(Path(dataset_response.json()["current_version"]["snapshot_path"]))
+    assert saved.sensors[0]["readings"] == [{"battery_pct": 90}]
 
 
 def test_delete_empty_title_scans_full_dataset_and_confirms(client: TestClient) -> None:

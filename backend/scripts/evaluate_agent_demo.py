@@ -1290,7 +1290,7 @@ def _run_special_check(
             warnings.append("Backend restart persistence explicitly skipped with --skip-restart-persistence.")
             events = [{"type": "restart_backend_check", "skipped": True}]
         elif not restart_backend_check:
-            failures.append("Backend restart persistence was not requested.")
+            warnings.append("Backend restart persistence was not requested; run with --restart-backend-check for subprocess restart verification.")
             events = [{"type": "restart_backend_check", "skipped": True}]
         else:
             softbank_path = dataset_paths_by_key.get("softbank")

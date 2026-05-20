@@ -34,6 +34,31 @@ This design lets the same agent handle DataFrames, ndarrays, nested JSON-like ob
 classes, mixed collections, and multi-dataset sessions without hardcoded schemas, column names, or
 data types.
 
+### External Tool Surface
+
+The external agent tool surface is intentionally minimal:
+
+- `execute_python`
+- `final_answer`
+- `request_confirmation`
+
+The runtime injects generic helpers that make arbitrary objects inspectable and artifact-friendly.
+They are not specialized analytics tools or schema routers:
+
+- `inspect_object`
+- `summarize_structure`
+- `find_record_collections`
+- `get_path`
+- `flatten_records_at_path`
+- `to_dataframe`
+- `object_to_record`
+- `objects_to_records`
+- `preview`
+- `preview_dataframe`
+- `save_table`
+- `save_chart`
+- `save_csv`
+
 ## Architecture
 
 The backend now runs a multi-role workflow while keeping the product a single general-purpose
@@ -351,10 +376,13 @@ Run the automated SoftBank eval against a running backend:
 python backend/scripts/evaluate_agent_demo.py \
   --suite softbank_core \
   --dataset /Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl \
-  --base-url http://localhost:8000 \
+  --base-url http://127.0.0.1:8000 \
   --frontend-url http://localhost:5173 \
-  --out backend/eval_reports/softbank_latest \
-  --include-screenshots
+  --out backend/eval_reports/final_softbank_core \
+  --use-real-agent \
+  --require-real-agent \
+  --include-screenshots \
+  --browser-smoke
 ```
 
 Run the generated arbitrary-dataset eval:
@@ -363,10 +391,13 @@ Run the generated arbitrary-dataset eval:
 python backend/scripts/evaluate_agent_demo.py \
   --suite generated_all \
   --dataset-dir ./agent_test_datasets \
-  --base-url http://localhost:8000 \
+  --base-url http://127.0.0.1:8000 \
   --frontend-url http://localhost:5173 \
-  --out backend/eval_reports/generated_latest \
-  --include-screenshots
+  --out backend/eval_reports/final_generated_all \
+  --use-real-agent \
+  --require-real-agent \
+  --include-screenshots \
+  --browser-smoke
 ```
 
 Use `--quick` for a shorter smoke pass, `--approve-mutations` when you intentionally want the
@@ -394,10 +425,28 @@ python backend/scripts/evaluate_agent_demo.py \
   --dataset-dir ./agent_test_datasets \
   --base-url http://127.0.0.1:8000 \
   --frontend-url http://localhost:5173 \
-  --out backend/eval_reports/advanced_real_latest \
+  --out backend/eval_reports/final_advanced_real \
   --use-real-agent \
   --require-real-agent \
   --approval-policy mixed \
+  --include-screenshots \
+  --browser-smoke
+```
+
+Run the dedicated restart-persistence suite:
+
+```bash
+python backend/scripts/evaluate_agent_demo.py \
+  --suite advanced_real \
+  --dataset /Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl \
+  --dataset-dir ./agent_test_datasets \
+  --base-url http://127.0.0.1:8000 \
+  --frontend-url http://localhost:5173 \
+  --out backend/eval_reports/final_restart_persistence \
+  --use-real-agent \
+  --require-real-agent \
+  --approval-policy mixed \
+  --restart-backend-check \
   --include-screenshots \
   --browser-smoke
 ```
@@ -520,6 +569,102 @@ Generated Python execution is also not a secure sandbox. The runtime uses a chil
 basic import restrictions, and socket blocking, but production use should run pickle loading and
 Python execution in isolated workers or containers with OS-level CPU, memory, network, filesystem,
 and process limits.
+
+### Timeout Configuration
+
+Runtime timeout values are exposed through environment-backed settings and `/health/config`:
+
+| Setting | Default | Purpose |
+| --- | ---: | --- |
+| `PYTHON_EXECUTION_TIMEOUT_SECONDS` | 60 | Child-process timeout for generic `execute_python` code. |
+| `MUTATION_PERSIST_TIMEOUT_SECONDS` | 120 | Reserved budget for optimized mutation persistence paths. |
+| `LLM_VERIFIER_TIMEOUT_SECONDS` | 8 | Optional semantic verifier API call timeout. |
+| `VERIFIER_TIME_BUDGET_PER_TURN_SECONDS` | 8 | Per-turn verifier budget before falling back to deterministic checks. |
+| `AGENT_MAX_STEPS` | 6 | Maximum coding/verifier loop steps per turn. |
+| `AGENT_MAX_RETRIES` | 3 | Maximum retries after verifier or code failures. |
+
+### Generic Optimized Mutation Framework
+
+Clear destructive edits are converted into an internal `MutationSpec` before the coding agent runs.
+This keeps the external tool surface unchanged while avoiding slow generated Python for common
+state changes. The optimized path discovers record collections and fields across top-level lists,
+DataFrames, dicts of DataFrames, nested dict/list data, and custom root objects with nested
+collections. It then performs a full impact scan, shows affected counts and examples in the
+confirmation card, and applies the change through versioned snapshot persistence after approval.
+
+Examples handled by the controller-level framework:
+
+- `delete all non Japan entries` / `keep only JP records`
+- `keep only granted patents`
+- `drop refunded orders`
+- `remove orders with gross_revenue below 100`
+- `remove readings with battery_pct below 20`
+- `keep only enterprise customers`
+- `remove records with missing title`
+- `drop duplicate records by country, doc_number, kind, and title`
+- `add filing_year based on filing_date and persist it`
+
+If the parser cannot confidently identify the target collection, field, operator, or value, it asks
+for clarification instead of mutating. Vague requests such as "remove bad records" and ambiguous
+field/value requests such as "delete all non active entries" remain clarification flows. Optimized
+mutations do not invoke `execute_python`, so they do not depend on increasing the Python execution
+timeout.
+
+## Tested Data Shapes
+
+Final validation covered:
+
+- SoftBank patent portfolio custom metadata objects.
+- Nested customer event dictionaries with customers, purchase events, items, support tickets, and risk flags.
+- Dicts containing pandas DataFrames plus NumPy arrays.
+- A custom `SensorFleet` class with nested readings, metrics, locations, and alerts.
+- Mixed top-level collections containing dicts, DataFrames, ndarrays, nested records, and tuples.
+
+## Artifact Rendering
+
+Assistant messages render final markdown, compact trace summaries, and inline artifacts:
+
+- Table cards preserve full artifact rows/columns while allowing the UI to display a compact preview.
+- Chart cards render bar, line, pie, scatter, and area specs with visible error cards for invalid specs.
+- CSV cards expose download URLs and preserve identifier fields as strings.
+- Artifacts, messages, traces, active dataset, active branch, and active version persist across browser refresh and backend restart.
+
+## Recommended Live Demo
+
+1. Upload `/Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl`.
+2. Ask: "What's in this file?"
+3. Ask: "Convert this dataset into a tabular preview if possible. Show the inferred columns and the first 5 rows."
+4. Ask: "Create a bar chart showing the number of patent records by country."
+5. Ask: "Show the top 10 countries by record count as a table, then create a bar chart from the same data."
+6. Ask: "Export the top 10 countries table as CSV without changing the dataset."
+7. Ask: "Remove bad records." The agent should ask for clarification and not mutate state.
+8. Ask: "delete last 500 entries." Reject once and verify the row count remains unchanged.
+9. Ask again, approve, and verify the row count changes from 24,410 to 23,910.
+10. Ask: "Show me the mutation history so far."
+11. Ask: "Roll back to the original uploaded dataset." Approve and verify the row count returns to 24,410.
+12. Refresh the browser and verify messages, artifacts, active dataset, branch, and version restore.
+13. Click **New conversation**, then restore the old session from **Recent sessions**.
+
+## Latest Validation
+
+Latest validation baseline before this change: `1837f6c7a93d03c56c5cc3d4deb2653058eaba93`.
+
+Final pre-submission validation was run in real-agent mode against `http://127.0.0.1:8000` and `http://localhost:5173` with `FAKE_AGENT_MODE=false`, `AGENT_MODEL_MODE=openai`, `VERIFIER_MODE=hybrid`, and `LLM_VERIFIER_POLICY=selective`.
+
+| Check | Result |
+| --- | --- |
+| Backend lint | `ruff check app tests scripts` passed |
+| Backend tests | `166 passed` |
+| Frontend build | `npm run build` passed |
+| Frontend lint | `npm run lint` passed |
+| SoftBank core eval | `14 passed`, `1 warning`, `0 failed` at `backend/eval_reports/final_softbank_core/report.md` |
+| Generated arbitrary datasets eval | `31 passed`, `0 warnings`, `0 failed` at `backend/eval_reports/final_generated_all/report.md` |
+| Advanced real eval | `13 passed`, `0 warnings`, `0 failed` at `backend/eval_reports/final_advanced_real/report.md` |
+| Restart persistence eval | `13 passed`, `0 warnings`, `0 failed` at `backend/eval_reports/final_restart_persistence/report.md` |
+| Browser smoke/screenshots | Passed; screenshots saved under each final report directory |
+| Secret scan | `git grep` checks found no committed API key or key fragment |
+
+The SoftBank core warning is expected for that suite because it does not request the restart-persistence special check. The dedicated restart suite performs the subprocess backend restart workflow and passes.
 
 Current implementation limitations:
 

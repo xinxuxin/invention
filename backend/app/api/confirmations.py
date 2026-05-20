@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
+import re
 from typing import Annotated, Any
 
 import pandas as pd
@@ -14,9 +16,12 @@ from app.agent.tools import AGENT_TOOLS, execution_result_for_model
 from app.api.chat import get_model_client
 from app.db.session import get_session
 from app.models.entities import AnalysisSession, Artifact, Branch, ChatMessage, Dataset, PendingConfirmation, VersionNode, new_id, utc_now
-from app.runtime.python_executor import ExecutionResult, PythonExecutor, object_to_record
+from app.runtime.python_executor import ExecutionResult, PythonExecutor, fast_get_field, object_to_record
 from app.schemas.confirmation import ConfirmationActionResponse, ConfirmationRead
 from app.services.introspection import introspect_object
+from app.services.mutation_intents import normalize_country_value, parse_country_filter_mutation
+from app.services.optimized_mutations import MutationSpec, apply_mutation_spec
+from app.services.optimized_mutations import parse_mutation_request
 from app.services.versioning import apply_version_to_dataset, latest_versions_for_branch, sync_branch_pointer
 from app.storage.files import load_pickle, save_snapshot
 
@@ -35,13 +40,23 @@ def approve_confirmation(
     payload: dict[str, Any] = Body(default_factory=dict),
 ) -> ConfirmationActionResponse:
     confirmation = _pending_confirmation_or_404(session_id, confirmation_id, db)
+    inferred_direct_args = _infer_direct_mutation_arguments(confirmation, db)
+    if inferred_direct_args:
+        confirmation.tool_arguments = {**dict(confirmation.tool_arguments or {}), **inferred_direct_args}
+        db.add(confirmation)
+        db.commit()
+        db.refresh(confirmation)
     if confirmation.tool_arguments.get("operation_kind") == "rollback":
         return _approve_rollback_confirmation(confirmation, db)
     if confirmation.tool_arguments.get("operation_kind") in {
+        "delete_first_n",
         "delete_last_n",
         "delete_empty_title",
         "delete_all_records",
+        "add_filing_year",
+        "filter_by_field",
         "remove_battery_below",
+        "mutation_spec",
     }:
         _validate_required_phrase(confirmation, payload)
         return _approve_direct_mutation_confirmation(confirmation, db)
@@ -143,6 +158,83 @@ def _confirmation_read(confirmation: PendingConfirmation) -> ConfirmationRead:
     )
 
 
+def _infer_direct_mutation_arguments(confirmation: PendingConfirmation, db: Session) -> dict[str, Any] | None:
+    existing_kind = confirmation.tool_arguments.get("operation_kind")
+    if isinstance(existing_kind, str) and existing_kind:
+        return None
+
+    text = " ".join(
+        str(value or "")
+        for value in (
+            confirmation.original_message,
+            confirmation.operation_summary,
+            confirmation.proposed_code,
+        )
+    ).lower()
+
+    if "filing_year" in text and "filing_date" in text:
+        return {
+            "operation_kind": "add_filing_year",
+            "mutation_summary": confirmation.operation_summary
+            or "Add derived field `filing_year` based on `filing_date`",
+        }
+
+    country_filter = parse_country_filter_mutation(text)
+    if country_filter is not None:
+        keep_value = country_filter.keep_value
+        return {
+            "operation_kind": "filter_by_field",
+            "field": "country",
+            "operator": "eq",
+            "keep_value": keep_value,
+            "delete_inverse": True,
+            "mutation_summary": confirmation.operation_summary
+            or f"Delete all non-{keep_value} records and keep only {keep_value} records",
+        }
+
+    if confirmation.active_dataset_id:
+        dataset = db.get(Dataset, confirmation.active_dataset_id)
+        if dataset is not None:
+            try:
+                value = load_pickle(Path(dataset.current_snapshot_path))
+                outcome = parse_mutation_request(
+                    confirmation.original_message or confirmation.operation_summary or text,
+                    value,
+                    target_dataset_id=dataset.id,
+                    target_dataset_name=dataset.dataset_key or dataset.original_filename,
+                )
+            except Exception:
+                outcome = None
+            if outcome is not None and outcome.spec is not None:
+                return {
+                    "operation_kind": "mutation_spec",
+                    "mutation_spec": outcome.spec.to_dict(),
+                    "mutation_summary": outcome.spec.human_summary or confirmation.operation_summary,
+                }
+
+    first_match = re.search(r"\b(?:delete|remove|drop)\s+first\s+(\d+)\s+(?:entries|rows|records)\b", text)
+    if first_match:
+        delete_count = int(first_match.group(1))
+        return {
+            "operation_kind": "delete_first_n",
+            "delete_count": delete_count,
+            "mutation_summary": confirmation.operation_summary
+            or f"Delete the first {delete_count:,} records from the current working dataset",
+        }
+
+    last_match = re.search(r"\b(?:delete|remove|drop)\s+last\s+(\d+)\s+(?:entries|rows|records)\b", text)
+    if last_match:
+        delete_count = int(last_match.group(1))
+        return {
+            "operation_kind": "delete_last_n",
+            "delete_count": delete_count,
+            "mutation_summary": confirmation.operation_summary
+            or f"Delete the last {delete_count:,} records from the current working dataset",
+        }
+
+    return None
+
+
 def _approve_rollback_confirmation(
     confirmation: PendingConfirmation,
     db: Session,
@@ -231,17 +323,32 @@ def _approve_direct_mutation_confirmation(
     try:
         current_value = load_pickle(Path(dataset.current_snapshot_path))
         operation_kind = str(confirmation.tool_arguments.get("operation_kind"))
-        if operation_kind == "delete_last_n":
+        if operation_kind == "delete_first_n":
+            new_value, preview = _delete_first_n_value(current_value, int(confirmation.tool_arguments.get("delete_count") or 0))
+        elif operation_kind == "delete_last_n":
             new_value, preview = _delete_last_n_value(current_value, int(confirmation.tool_arguments.get("delete_count") or 0))
         elif operation_kind == "delete_empty_title":
             new_value, preview = _delete_empty_title_value(current_value)
         elif operation_kind == "delete_all_records":
             new_value, preview = _delete_all_records_value(current_value)
+        elif operation_kind == "add_filing_year":
+            new_value, preview = _add_filing_year_value(current_value)
+        elif operation_kind == "filter_by_field":
+            new_value, preview = _filter_by_field_value(
+                current_value,
+                str(confirmation.tool_arguments.get("field") or ""),
+                str(confirmation.tool_arguments.get("keep_value") or ""),
+            )
         elif operation_kind == "remove_battery_below":
             new_value, preview = _remove_battery_below_value(
                 current_value,
                 float(confirmation.tool_arguments.get("threshold") or 0),
             )
+        elif operation_kind == "mutation_spec":
+            spec_payload = confirmation.tool_arguments.get("mutation_spec")
+            if not isinstance(spec_payload, Mapping):
+                raise ValueError("Missing optimized mutation spec")
+            new_value, preview = apply_mutation_spec(current_value, MutationSpec.from_mapping(spec_payload))
         else:
             raise ValueError(f"Unsupported direct mutation: {operation_kind}")
 
@@ -335,6 +442,29 @@ def _delete_last_n_value(value: Any, delete_count: int) -> tuple[Any, dict[str, 
     }
 
 
+def _delete_first_n_value(value: Any, delete_count: int) -> tuple[Any, dict[str, Any]]:
+    current_count = _safe_len(value)
+    count = max(0, min(delete_count, current_count))
+    if isinstance(value, pd.DataFrame):
+        new_value = value.iloc[count:].copy() if count else value.copy()
+    elif isinstance(value, list):
+        new_value = value[count:] if count else list(value)
+    elif isinstance(value, tuple):
+        new_value = value[count:] if count else tuple(value)
+    else:
+        frame = pd.DataFrame([object_to_record(item) for item in value]) if _is_iterable_records(value) else None
+        if frame is None:
+            raise ValueError("This object type does not support deleting the first records safely")
+        new_value = frame.iloc[count:].copy() if count else frame.copy()
+    return new_value, {
+        "full_scan": True,
+        "deleted_count": count,
+        "affected_count": count,
+        "current_row_count": current_count,
+        "new_row_count": _safe_len(new_value),
+    }
+
+
 def _delete_empty_title_value(value: Any) -> tuple[Any, dict[str, Any]]:
     if isinstance(value, pd.DataFrame):
         current_count = int(len(value))
@@ -380,6 +510,124 @@ def _delete_all_records_value(value: Any) -> tuple[Any, dict[str, Any]]:
         "deleted_count": int(current_count),
         "current_row_count": int(current_count),
         "new_row_count": 0,
+    }
+
+
+def _add_filing_year_value(value: Any) -> tuple[Any, dict[str, Any]]:
+    def filing_year(item: Any) -> int | None:
+        record = object_to_record(item)
+        raw = record.get("filing_date")
+        if raw is None:
+            return None
+        if hasattr(raw, "year"):
+            try:
+                return int(raw.year)
+            except (TypeError, ValueError):
+                return None
+        parsed = pd.to_datetime(raw, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        return int(parsed.year)
+
+    if isinstance(value, pd.DataFrame):
+        current_count = int(len(value))
+        if "filing_date" not in value.columns:
+            raise ValueError("No filing_date field exists on this dataset")
+        new_value = value.copy()
+        new_value["filing_year"] = pd.to_datetime(new_value["filing_date"], errors="coerce").dt.year.astype("Int64")
+        derived_count = int(new_value["filing_year"].notna().sum())
+    elif isinstance(value, list):
+        current_count = len(value)
+        new_value = [_copy_with_field(item, "filing_year", filing_year(item)) for item in value]
+        derived_count = sum(1 for item in new_value if object_to_record(item).get("filing_year") is not None)
+    elif isinstance(value, tuple):
+        current_count = len(value)
+        new_value = tuple(_copy_with_field(item, "filing_year", filing_year(item)) for item in value)
+        derived_count = sum(1 for item in new_value if object_to_record(item).get("filing_year") is not None)
+    else:
+        raise ValueError("This object type does not support adding filing_year safely")
+
+    return new_value, {
+        "full_scan": True,
+        "derived_field": "filing_year",
+        "derived_non_null_count": int(derived_count),
+        "affected_count": int(current_count),
+        "current_row_count": int(current_count),
+        "new_row_count": _safe_len(new_value),
+    }
+
+
+def _copy_with_field(item: Any, field: str, value: Any) -> Any:
+    if isinstance(item, dict):
+        copied = dict(item)
+        copied[field] = value
+        return copied
+    try:
+        import copy
+
+        copied = copy.copy(item)
+        setattr(copied, field, value)
+        return copied
+    except Exception:
+        record = object_to_record(item)
+        record[field] = value
+    return record
+
+
+def _filter_by_field_value(value: Any, field: str, keep_value: str) -> tuple[Any, dict[str, Any]]:
+    if field != "country":
+        raise ValueError(f"Unsupported optimized filter field: {field}")
+
+    def keep(item: Any) -> bool:
+        return normalize_country_value(fast_get_field(item, field)) == keep_value
+
+    if isinstance(value, pd.DataFrame):
+        current_count = int(len(value))
+        if field not in value.columns:
+            raise ValueError(f"No {field} field exists on this dataset")
+        normalized = value[field].map(normalize_country_value)
+        keep_mask = normalized.eq(keep_value)
+        removed_counts = normalized.loc[~keep_mask].fillna("Unknown").value_counts(dropna=False).to_dict()
+        new_value = value.loc[keep_mask].copy()
+        affected_count = current_count - int(keep_mask.sum())
+    elif isinstance(value, list):
+        current_count = len(value)
+        kept_items = []
+        removed_counts: dict[str, int] = {}
+        for item in value:
+            normalized = normalize_country_value(fast_get_field(item, field))
+            if normalized == keep_value:
+                kept_items.append(item)
+            else:
+                key = normalized or "Unknown"
+                removed_counts[key] = removed_counts.get(key, 0) + 1
+        new_value = kept_items
+        affected_count = current_count - len(kept_items)
+    elif isinstance(value, tuple):
+        current_count = len(value)
+        kept_items = []
+        removed_counts = {}
+        for item in value:
+            normalized = normalize_country_value(fast_get_field(item, field))
+            if normalized == keep_value:
+                kept_items.append(item)
+            else:
+                key = normalized or "Unknown"
+                removed_counts[key] = removed_counts.get(key, 0) + 1
+        new_value = tuple(kept_items)
+        affected_count = current_count - len(kept_items)
+    else:
+        raise ValueError("This object type does not support optimized field filtering safely")
+
+    return new_value, {
+        "full_scan": True,
+        "field": field,
+        "keep_value": keep_value,
+        "delete_inverse": True,
+        "affected_count": int(affected_count),
+        "current_row_count": int(current_count),
+        "new_row_count": _safe_len(new_value),
+        "removed_value_counts": {str(key): int(count) for key, count in removed_counts.items()},
     }
 
 
@@ -514,6 +762,12 @@ def _direct_mutation_answer(summary: str, preview: dict[str, Any]) -> str:
     new_count = preview.get("new_row_count")
     affected_count = preview.get("affected_count") or preview.get("deleted_count")
     if isinstance(current_count, int) and isinstance(new_count, int):
+        if current_count == new_count:
+            return (
+                f"Applied: {summary}. Updated records: {affected_count}. "
+                f"Row count remains {new_count:,}.\n\n"
+                "**State changed:** Yes"
+            )
         return (
             f"Applied: {summary}. Affected records: {affected_count}. "
             f"Row count changed from {current_count:,} to {new_count:,}.\n\n"
@@ -565,6 +819,7 @@ def _persist_confirmation_events(
             message.status = "done"
             message.final_answer = str(event.get("answer") or "")
             message.state_changed = bool(event.get("state_changed"))
+            message.pending_action = None
         elif event_type == "message_done":
             if message.status == "streaming":
                 message.status = "done"
