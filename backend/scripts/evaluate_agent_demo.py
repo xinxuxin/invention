@@ -4,7 +4,11 @@ import argparse
 import json
 import os
 import re
+import shutil
+import socket
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -114,9 +118,11 @@ def main() -> int:
     parser.add_argument("--use-fake-agent", action="store_true", help="Require the running backend to be in fake mode.")
     parser.add_argument("--browser-smoke", action="store_true")
     parser.add_argument("--include-screenshots", action="store_true")
+    parser.add_argument("--skip-browser", action="store_true", help="Explicitly skip browser smoke/screenshots.")
     parser.add_argument("--session-id")
     parser.add_argument("--fresh-session", action="store_true", help="Force a newly-created session even if --session-id is supplied.")
     parser.add_argument("--restart-backend-check", action="store_true")
+    parser.add_argument("--skip-restart-persistence", action="store_true", help="Explicitly skip subprocess backend restart persistence checks.")
     parser.add_argument("--debug-trace", action="store_true")
     args = parser.parse_args()
 
@@ -150,14 +156,17 @@ def main() -> int:
     uploads = _upload_required_datasets(base_url, session_id, dataset_paths, existing_session=bool(args.session_id))
     active_dataset_id = uploads[0].dataset_id if uploads else _active_dataset_id(base_url, session_id)
 
+    browser_enabled = (args.browser_smoke or args.include_screenshots or args.suite == "advanced_real") and not args.skip_browser
     browser = BrowserSmoke(
-        enabled=args.browser_smoke or args.include_screenshots,
+        enabled=browser_enabled,
         frontend_url=frontend_url,
         session_id=session_id,
         screenshots_dir=screenshots_dir,
     )
     browser_warning = browser.start()
-    if not (args.browser_smoke or args.include_screenshots):
+    if args.skip_browser:
+        browser_warning = "Browser smoke explicitly skipped with --skip-browser."
+    elif not browser_enabled:
         browser_warning = (
             browser_warning
             or "Browser smoke and screenshots were not requested; artifact render checks were API-only."
@@ -184,7 +193,8 @@ def main() -> int:
                 browser=browser,
                 dataset_paths_by_key=dataset_paths_by_key,
                 approval_policy=args.approval_policy or ("approve" if args.approve_mutations else "mixed"),
-                restart_backend_check=args.restart_backend_check,
+                restart_backend_check=args.restart_backend_check or (args.suite == "advanced_real" and not args.skip_restart_persistence),
+                skip_restart_persistence=args.skip_restart_persistence,
                 debug_trace=args.debug_trace,
             )
             results.append(result)
@@ -199,7 +209,9 @@ def main() -> int:
                 raw_events_dir=raw_events_dir,
                 browser=browser,
                 debug_trace=args.debug_trace,
-                restart_backend_check=args.restart_backend_check,
+                restart_backend_check=args.restart_backend_check or (args.suite == "advanced_real" and not args.skip_restart_persistence),
+                skip_restart_persistence=args.skip_restart_persistence,
+                dataset_paths_by_key=dataset_paths_by_key,
             )
             results.append(result)
             continue
@@ -242,7 +254,43 @@ def main() -> int:
         transcript.append((question.prompt, result.final_answer))
 
     if browser_warning:
-        results.insert(0, _warning_result("browser_smoke", browser_warning, raw_events_dir))
+        browser_required = browser_enabled and not args.skip_browser
+        factory = _failure_result if browser_required else _warning_result
+        results.insert(0, factory("browser_smoke", browser_warning, raw_events_dir))
+    elif browser.failures:
+        raw_path = raw_events_dir / "browser_smoke_failures.json"
+        raw_path.write_text(json.dumps(browser.failures, ensure_ascii=False, indent=2), encoding="utf-8")
+        results.insert(
+            0,
+            QuestionResult(
+                id="browser_smoke",
+                question="Browser smoke artifact rendering",
+                status="fail",
+                failure_reasons=browser.failures,
+                warning_reasons=[],
+                final_answer="\n".join(browser.failures),
+                artifacts=[],
+                execute_python_calls=0,
+                code_failed_count=0,
+                verifier_retries=0,
+                llm_verifier_called=False,
+                llm_verifier_skipped=False,
+                llm_verifier_fallback_used=False,
+                llm_verifier_skip_reason=None,
+                state_changed=False,
+                confirmation_required=False,
+                raw_events_path=str(raw_path),
+            ),
+        )
+    elif browser_enabled and not any(result.screenshot_path for result in results):
+        results.insert(
+            0,
+            _failure_result(
+                "browser_smoke",
+                "Browser smoke was required but no screenshots were captured.",
+                raw_events_dir,
+            ),
+        )
 
     browser.close()
 
@@ -894,12 +942,14 @@ def _run_scenario_check(
     dataset_paths_by_key: dict[str, Path],
     approval_policy: str,
     restart_backend_check: bool,
+    skip_restart_persistence: bool,
     debug_trace: bool,
 ) -> QuestionResult:
     scenario = question.scenario or {}
     session_id = default_session_id
     if scenario.get("fresh_session"):
         session_id = _create_session(base_url, f"Advanced eval {question.id} {int(time.time())}")["id"]
+    browser.session_id = session_id
 
     dataset_keys = list(scenario.get("datasets") or [])
     if not dataset_keys and scenario.get("dataset"):
@@ -951,7 +1001,7 @@ def _run_scenario_check(
             confirmation = _last_event(events, "confirmation_required")
             if confirmation:
                 last_confirmation = confirmation
-            transcript_parts.append(f"User: {step['ask']}\nAssistant: {str(_last_event(events, 'final_answer').get('answer') or '').strip()}")
+            transcript_parts.append(f"User: {step['ask']}\nAssistant: {_assistant_text_from_events(events)}")
         elif step.get("approve_confirmation"):
             events = _resolve_confirmation(base_url, session_id, last_confirmation, action="approve")
         elif step.get("reject_confirmation"):
@@ -970,13 +1020,20 @@ def _run_scenario_check(
             history = _json_get(base_url, f"/api/sessions/{session_id}/history")
             events = [{"type": "mutation_history", "history": history, "version_count": len(history.get("versions", []))}]
         elif step.get("restart_backend_optional"):
-            message = (
-                "Backend restart automation is environment-specific and was not executed."
-                if not restart_backend_check
-                else "Backend restart flag was set, but this harness cannot safely restart the externally-managed server."
-            )
-            events = [{"type": "restart_backend_check", "message": message}]
-            warnings.append(message)
+            if skip_restart_persistence:
+                message = "Backend restart persistence explicitly skipped with --skip-restart-persistence."
+                events = [{"type": "restart_backend_check", "message": message, "skipped": True}]
+                warnings.append(message)
+            elif restart_backend_check:
+                softbank_path = dataset_paths_by_key.get("softbank")
+                if softbank_path is None:
+                    events = [{"type": "error", "message": "SoftBank dataset path unavailable for restart persistence check."}]
+                else:
+                    events = _run_backend_restart_persistence_check(softbank_path)
+            else:
+                message = "Backend restart persistence was not requested."
+                events = [{"type": "restart_backend_check", "message": message, "skipped": True}]
+                failures.append(message)
         else:
             events = [{"type": "warning", "message": f"Unknown scenario step: {step}"}]
 
@@ -997,6 +1054,10 @@ def _run_scenario_check(
             artifacts=artifacts,
             artifact_contents=artifact_contents,
         )
+        if _state_operation_has_empty_response(events):
+            step_failures.append("State operation produced an empty assistant response.")
+        if _unsupported_mutation_changed_state(events):
+            step_failures.append("Unsupported mutation incorrectly marked state_changed=true.")
         failures.extend(f"{label}: {reason}" for reason in step_failures)
         warnings.extend(f"{label}: {reason}" for reason in step_warnings)
         step_records.append(
@@ -1074,11 +1135,14 @@ def _resolve_confirmation(
 ) -> list[dict[str, Any]]:
     if not confirmation or not confirmation.get("confirmation_id"):
         return [{"type": "error", "message": f"No pending confirmation available to {action}."}]
+    payload: dict[str, Any] = {}
+    if action == "approve" and confirmation.get("required_confirmation_phrase"):
+        payload["confirmation_phrase"] = confirmation["required_confirmation_phrase"]
     response = _json_request(
         base_url,
         "POST",
         f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/{action}",
-        {},
+        payload,
     )
     events: list[dict[str, Any]] = []
     for event in response.get("events", []):
@@ -1156,6 +1220,11 @@ def _run_scenario_expectation(
         return present is expected, f"Expected confirmation_required={expected}, got {present}.", "fail"
     if "confirmation_payload" in expectation:
         return _check_confirmation_payload(expectation["confirmation_payload"], _last_event(events, "confirmation_required"))
+    if "restart_executed" in expectation:
+        executed = any(event.get("type") == "restart_backend_check" and event.get("executed") is True for event in events)
+        passed = any(event.get("type") == "restart_backend_check" and event.get("passed") is True for event in events)
+        expected = bool(expectation["restart_executed"])
+        return (executed and (passed or not expected)) is expected, f"Expected restart_executed={expected}; got executed={executed}, passed={passed}.", "fail"
     if "message_count_min" in expectation:
         event = _last_event(events, "refresh_session")
         count = int(event.get("message_count") or 0)
@@ -1174,7 +1243,7 @@ def _run_scenario_expectation(
 def _check_confirmation_payload(expected: dict[str, Any], confirmation: dict[str, Any]) -> tuple[bool, str, str]:
     if not confirmation:
         return False, "Missing confirmation payload.", "fail"
-    for key in ("affected_count", "current_row_count", "new_row_count", "reversible"):
+    for key in ("affected_count", "current_row_count", "new_row_count", "reversible", "risk_level"):
         if key in expected and confirmation.get(key) != expected[key]:
             return False, f"Confirmation `{key}` expected {expected[key]!r}, got {confirmation.get(key)!r}.", "fail"
     contains = expected.get("operation_summary_contains")
@@ -1183,7 +1252,7 @@ def _check_confirmation_payload(expected: dict[str, Any], confirmation: dict[str
         terms = [str(term).lower() for term in contains]
         if not all(term in summary for term in terms):
             return False, f"Confirmation operation summary missing terms {terms}.", "fail"
-    for key in ("operation_summary", "rollback_note", "state_impact"):
+    for key in ("operation_summary", "rollback_note", "state_impact", "required_confirmation_phrase"):
         if expected.get(key) is True and not confirmation.get(key):
             return False, f"Confirmation payload missing {key}.", "fail"
     return True, "", "fail"
@@ -1199,6 +1268,8 @@ def _run_special_check(
     browser: BrowserSmoke,
     debug_trace: bool,
     restart_backend_check: bool,
+    skip_restart_persistence: bool,
+    dataset_paths_by_key: dict[str, Path],
 ) -> QuestionResult:
     del debug_trace
     events: list[dict[str, Any]] = []
@@ -1215,10 +1286,23 @@ def _run_special_check(
         screenshot_path = browser.capture(question_id, artifacts if isinstance(artifacts, list) else [])
     elif question.special == "restart_persistence":
         screenshot_path = None
-        if not restart_backend_check:
-            warnings.append("Backend restart check skipped; pass --restart-backend-check to run it manually.")
+        if skip_restart_persistence:
+            warnings.append("Backend restart persistence explicitly skipped with --skip-restart-persistence.")
+            events = [{"type": "restart_backend_check", "skipped": True}]
+        elif not restart_backend_check:
+            failures.append("Backend restart persistence was not requested.")
+            events = [{"type": "restart_backend_check", "skipped": True}]
         else:
-            warnings.append("Automated backend restart is environment-specific; API persistence endpoints remain checked.")
+            softbank_path = dataset_paths_by_key.get("softbank")
+            if softbank_path is None:
+                failures.append("SoftBank dataset path unavailable for backend restart check.")
+                events = [{"type": "error", "message": failures[-1]}]
+            else:
+                events = _run_backend_restart_persistence_check(softbank_path)
+                if any(event.get("type") == "error" for event in events):
+                    failures.extend(str(event.get("message")) for event in events if event.get("type") == "error")
+                if not any(event.get("type") == "restart_backend_check" and event.get("executed") is True for event in events):
+                    failures.append("Backend restart persistence did not execute.")
     else:
         screenshot_path = None
         warnings.append(f"Unknown special check: {question.special}")
@@ -1255,6 +1339,7 @@ class BrowserSmoke:
         self.session_id = session_id
         self.screenshots_dir = screenshots_dir
         self.available = False
+        self.failures: list[str] = []
         self._playwright: Any = None
         self._browser: Any = None
         self._page: Any = None
@@ -1278,16 +1363,17 @@ class BrowserSmoke:
     def capture(self, question_id: str, artifacts: list[dict[str, Any]]) -> str | None:
         if not self.enabled or not self.available or self._page is None:
             return None
+        path = self.screenshots_dir / f"{question_id}.png"
         try:
             url = f"{self.frontend_url}/?session={urllib.parse.quote(self.session_id)}"
             self._page.goto(url, wait_until="networkidle", timeout=20_000)
             self._page.wait_for_timeout(1000)
-            path = self.screenshots_dir / f"{question_id}.png"
             self._page.screenshot(path=str(path), full_page=False)
             self._smoke_assert_artifacts(artifacts)
             return str(path)
-        except Exception:
-            return None
+        except Exception as exc:
+            self.failures.append(f"{question_id}: browser smoke failed: {exc}")
+            return str(path) if path.exists() else None
 
     def _smoke_assert_artifacts(self, artifacts: list[dict[str, Any]]) -> None:
         if self._page is None:
@@ -1338,6 +1424,203 @@ def _warning_result(identifier: str, warning: str, raw_events_dir: Path) -> Ques
     )
 
 
+def _failure_result(identifier: str, message: str, raw_events_dir: Path) -> QuestionResult:
+    raw_path = raw_events_dir / f"{identifier}.json"
+    raw_path.write_text(json.dumps([{"type": "error", "message": message}], indent=2), encoding="utf-8")
+    return QuestionResult(
+        id=identifier,
+        question="Required evaluation setup",
+        status="fail",
+        failure_reasons=[message],
+        warning_reasons=[],
+        final_answer=message,
+        artifacts=[],
+        execute_python_calls=0,
+        code_failed_count=0,
+        verifier_retries=0,
+        llm_verifier_called=False,
+        llm_verifier_skipped=False,
+        llm_verifier_fallback_used=False,
+        llm_verifier_skip_reason=None,
+        state_changed=False,
+        confirmation_required=False,
+        raw_events_path=str(raw_path),
+    )
+
+
+def _run_backend_restart_persistence_check(dataset_path: Path) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = [{"type": "restart_backend_check", "executed": True, "phase": "start"}]
+    tmp_dir = Path(tempfile.mkdtemp(prefix="agent-restart-eval-"))
+    process: subprocess.Popen[str] | None = None
+    try:
+        base_url, process = _start_isolated_backend(tmp_dir)
+        session = _create_session(base_url, f"Restart persistence eval {int(time.time())}")
+        session_id = str(session["id"])
+        upload = _upload_pickle(base_url, session_id, dataset_path)["datasets"][0]
+        dataset_id = str(upload["id"])
+
+        delete_events = _stream_chat(base_url, session_id, dataset_id, "delete last 500 entries")
+        events.extend(_tag_restart_events(delete_events, "delete_request"))
+        confirmation = _last_event(delete_events, "confirmation_required")
+        if not confirmation:
+            events.append({"type": "error", "message": "Restart check did not receive delete confirmation."})
+            return events
+        approve_events = _resolve_confirmation(base_url, session_id, confirmation, action="approve")
+        events.extend(_tag_restart_events(approve_events, "delete_approve"))
+        count_after_delete = _dataset_profile_count(base_url, session_id, dataset_id)
+        if count_after_delete != 23910:
+            events.append({"type": "error", "message": f"Expected 23,910 rows after delete, got {count_after_delete}."})
+            return events
+        if not _history_contains(base_url, session_id, "last 500"):
+            events.append({"type": "error", "message": "Mutation history did not contain delete last 500 after approval."})
+            return events
+
+        _terminate_backend(process)
+        process = None
+        base_url, process = _start_isolated_backend(tmp_dir)
+        _json_get(base_url, f"/api/sessions/{session_id}")
+        count_after_restart = _dataset_profile_count(base_url, session_id, dataset_id)
+        if count_after_restart != 23910:
+            events.append({"type": "error", "message": f"Expected 23,910 rows after restart, got {count_after_restart}."})
+            return events
+        if not _history_contains(base_url, session_id, "last 500"):
+            events.append({"type": "error", "message": "Mutation history lost delete operation after restart."})
+            return events
+
+        rollback_events = _stream_chat(base_url, session_id, dataset_id, "Roll back to the original uploaded dataset.")
+        events.extend(_tag_restart_events(rollback_events, "rollback_request"))
+        rollback_confirmation = _last_event(rollback_events, "confirmation_required")
+        if not rollback_confirmation:
+            events.append({"type": "error", "message": "Restart check did not receive rollback confirmation."})
+            return events
+        rollback_approve = _resolve_confirmation(base_url, session_id, rollback_confirmation, action="approve")
+        events.extend(_tag_restart_events(rollback_approve, "rollback_approve"))
+        count_after_rollback = _dataset_profile_count(base_url, session_id, dataset_id)
+        if count_after_rollback != 24410:
+            events.append({"type": "error", "message": f"Expected 24,410 rows after rollback, got {count_after_rollback}."})
+            return events
+
+        _terminate_backend(process)
+        process = None
+        base_url, process = _start_isolated_backend(tmp_dir)
+        count_after_second_restart = _dataset_profile_count(base_url, session_id, dataset_id)
+        if count_after_second_restart != 24410:
+            events.append(
+                {
+                    "type": "error",
+                    "message": f"Expected 24,410 rows after rollback restart, got {count_after_second_restart}.",
+                }
+            )
+            return events
+        events.append(
+            {
+                "type": "restart_backend_check",
+                "executed": True,
+                "passed": True,
+                "message": "Backend restart persistence verified for delete, history, rollback, and second restart.",
+                "session_id": session_id,
+                "storage_dir": str(tmp_dir),
+            }
+        )
+        return events
+    except Exception as exc:
+        events.append({"type": "error", "message": f"Backend restart persistence check failed: {exc}"})
+        return events
+    finally:
+        if process is not None:
+            _terminate_backend(process)
+        if os.getenv("EVAL_KEEP_RESTART_STORAGE") != "1":
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _start_isolated_backend(tmp_dir: Path) -> tuple[str, subprocess.Popen[str]]:
+    port = _free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    log_path = tmp_dir / f"backend-{port}.log"
+    env = os.environ.copy()
+    env.update(
+        {
+            "DATABASE_URL": f"sqlite:///{tmp_dir / 'eval.db'}",
+            "STORAGE_DIR": str(tmp_dir / "storage"),
+            "BACKEND_CORS_ORIGINS": '["http://localhost:5173","http://127.0.0.1:5173"]',
+            "AGENT_MODEL_MODE": env.get("AGENT_MODEL_MODE", "openai"),
+            "FAKE_AGENT_MODE": "false",
+            "PYTHONPATH": ".",
+        }
+    )
+    backend_dir = Path(__file__).resolve().parents[1]
+    log_file = log_path.open("a", encoding="utf-8")
+    process = subprocess.Popen(
+        [_backend_python(), "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=str(backend_dir),
+        env=env,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"Backend exited early; see {log_path}")
+        try:
+            _json_get(base_url, "/health")
+            return base_url, process
+        except Exception:
+            time.sleep(0.5)
+    raise RuntimeError(f"Backend did not become healthy; see {log_path}")
+
+
+def _terminate_backend(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def _backend_python() -> str:
+    candidate = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.exists() else sys.executable
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _dataset_profile_count(base_url: str, session_id: str, dataset_id: str) -> int | None:
+    dataset = _json_get(base_url, f"/api/sessions/{session_id}/datasets/{dataset_id}")
+    profile = dataset.get("profile") if isinstance(dataset, dict) else {}
+    if not isinstance(profile, dict):
+        return None
+    for key in ("length", "row_count"):
+        value = profile.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+    shape = profile.get("shape")
+    if isinstance(shape, list) and shape and isinstance(shape[0], (int, float)):
+        return int(shape[0])
+    return None
+
+
+def _history_contains(base_url: str, session_id: str, text: str) -> bool:
+    history = _json_get(base_url, f"/api/sessions/{session_id}/history")
+    return text.lower() in json.dumps(history, ensure_ascii=False, default=str).lower()
+
+
+def _tag_restart_events(events: list[dict[str, Any]], phase: str) -> list[dict[str, Any]]:
+    tagged: list[dict[str, Any]] = []
+    for event in events:
+        clone = dict(event)
+        clone["restart_phase"] = phase
+        tagged.append(clone)
+    return tagged
+
+
 def _debug_warnings(events: list[dict[str, Any]]) -> list[str]:
     warnings: list[str] = []
     for event in events:
@@ -1345,6 +1628,61 @@ def _debug_warnings(events: list[dict[str, Any]]) -> list[str]:
             warnings.append("LLM verifier fallback trace observed.")
             break
     return warnings
+
+
+def _state_operation_has_empty_response(events: list[dict[str, Any]]) -> bool:
+    state_event_types = {"confirmation_required", "final_answer"}
+    if not any(event.get("type") in state_event_types for event in events):
+        return False
+    if any(event.get("type") == "confirmation_required" for event in events):
+        confirmation = _last_event(events, "confirmation_required")
+        text = " ".join(
+            str(confirmation.get(key) or "")
+            for key in ("message", "operation_summary", "expected_effect", "state_impact")
+        ).strip()
+        return not text
+    finals = [event for event in events if event.get("type") == "final_answer"]
+    if not finals:
+        return False
+    return any(not str(event.get("answer") or "").strip() for event in finals)
+
+
+def _assistant_text_from_events(events: list[dict[str, Any]]) -> str:
+    final = _last_event(events, "final_answer")
+    answer = str(final.get("answer") or "").strip()
+    if answer:
+        return answer
+    confirmation = _last_event(events, "confirmation_required")
+    if confirmation:
+        parts = [
+            str(confirmation.get("operation_summary") or confirmation.get("message") or "").strip(),
+            str(confirmation.get("expected_effect") or "").strip(),
+            str(confirmation.get("state_impact") or "").strip(),
+        ]
+        counts = []
+        if confirmation.get("current_row_count") is not None:
+            counts.append(f"current rows: {confirmation.get('current_row_count')}")
+        if confirmation.get("new_row_count") is not None:
+            counts.append(f"after approval: {confirmation.get('new_row_count')}")
+        if confirmation.get("affected_count") is not None:
+            counts.append(f"affected: {confirmation.get('affected_count')}")
+        if counts:
+            parts.append("; ".join(counts))
+        if confirmation.get("required_confirmation_phrase"):
+            parts.append(f"Required phrase: {confirmation.get('required_confirmation_phrase')}")
+        text = " ".join(part for part in parts if part)
+        if text:
+            return text
+    error = _last_event(events, "error")
+    if error:
+        return str(error.get("message") or "Error").strip()
+    return ""
+
+
+def _unsupported_mutation_changed_state(events: list[dict[str, Any]]) -> bool:
+    final = _last_event(events, "final_answer")
+    answer = str(final.get("answer") or "").lower()
+    return "unsupported" in answer and final.get("state_changed") is True
 
 
 def _last_event(events: list[dict[str, Any]], event_type: str) -> dict[str, Any]:
@@ -1418,6 +1756,17 @@ def _build_report(
             "mutation_count": sum(1 for result in results if result.state_changed),
             "rollback_related_count": sum(1 for result in results if "rollback" in result.id.lower() or "rollback" in result.final_answer.lower()),
             "browser_screenshot_count": sum(1 for result in results if result.screenshot_path),
+            "restart_persistence_executed": _restart_persistence_executed(results),
+            "unsupported_mutation_count": sum(1 for result in results if "unsupported" in result.final_answer.lower() or "cannot safely" in result.final_answer.lower()),
+            "empty_assistant_response_count": _empty_assistant_response_count(results),
+            "artifact_payload_verification_count": sum(
+                1
+                for result in results
+                for artifact in result.artifacts
+                if artifact.get("row_count") is not None
+                or artifact.get("data_length") is not None
+                or artifact.get("download_url")
+            ),
         },
         "suite": suite,
         "suite_names": suite_names,
@@ -1457,6 +1806,11 @@ def _build_report(
 
 def _markdown_report(report: dict[str, Any]) -> str:
     summary = report["summary"]
+    skipped_lines = [
+        f"- {item['id']}: {'; '.join(item['warning_reasons'] or item['failure_reasons'])}"
+        for item in report["questions"]
+        if "explicitly skipped" in " ".join(item["warning_reasons"] + item["failure_reasons"]).lower()
+    ] or ["- None"]
     lines = [
         "# Data Analysis Agent Evaluation Report",
         "",
@@ -1472,6 +1826,10 @@ def _markdown_report(report: dict[str, Any]) -> str:
         f"- Total questions: {summary['total']}",
         f"- Pass/fail/warning: {summary['passed']} pass, {summary['warnings']} warning, {summary['failed']} fail",
         f"- Metrics: {json.dumps(report.get('metrics', {}), ensure_ascii=False)}",
+        "",
+        "## Skipped Only Because Explicit Flag Was Used",
+        "",
+        *skipped_lines,
         "",
         "## Summary",
         "",
@@ -1566,6 +1924,44 @@ def _artifact_markdown_lines(artifacts: list[dict[str, Any]]) -> list[str]:
             detail = ""
         lines.append(f"- {artifact.get('kind')}: {artifact.get('title')} `{artifact.get('id')}` {detail}")
     return lines
+
+
+def _restart_persistence_executed(results: list[QuestionResult]) -> bool:
+    for result in results:
+        for event in _raw_events_for_result(result):
+            if event.get("type") == "restart_backend_check" and event.get("executed") is True:
+                return True
+    return False
+
+
+def _empty_assistant_response_count(results: list[QuestionResult]) -> int:
+    count = 0
+    for result in results:
+        events = _raw_events_for_result(result)
+        if _state_operation_has_empty_response(events):
+            count += 1
+    return count
+
+
+def _raw_events_for_result(result: QuestionResult) -> list[dict[str, Any]]:
+    try:
+        raw = json.loads(Path(result.raw_events_path).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(raw, dict):
+        events = raw.get("events")
+        if isinstance(events, list):
+            return [event for event in events if isinstance(event, dict)]
+        steps = raw.get("steps")
+        if isinstance(steps, list):
+            output: list[dict[str, Any]] = []
+            for step in steps:
+                if isinstance(step, dict) and isinstance(step.get("events"), list):
+                    output.extend(event for event in step["events"] if isinstance(event, dict))
+            return output
+    if isinstance(raw, list):
+        return [event for event in raw if isinstance(event, dict)]
+    return []
 
 
 def _code_snippets_from_raw(path: Path) -> list[str]:
@@ -1979,7 +2375,32 @@ SUITES: dict[str, list[EvalQuestion]] = {
                     {"ask": "delete empty title", "expect": ["zero_affected_no_confirmation_or_confirmation_required", {"state_changed": False}]},
                     {"ask": "Remove bad records.", "expect": ["clarification_answer", "no_python_execution", {"state_changed": False}]},
                     {"ask": "Clean this dataset.", "expect": ["clarification_answer", "no_python_execution", {"state_changed": False}]},
-                    {"ask": "Delete everything.", "expect": ["clarification_answer", "no_python_execution", {"state_changed": False}]},
+                    {
+                        "ask": "Delete everything.",
+                        "expect": [
+                            {"confirmation_required": True},
+                            {"confirmation_payload": {"operation_summary_contains": ["delete", "all records"], "affected_count": 24410, "current_row_count": 24410, "new_row_count": 0, "reversible": True, "rollback_note": True, "risk_level": "high", "required_confirmation_phrase": True}},
+                            "state_not_changed_before_approval",
+                        ],
+                    },
+                    {"reject_confirmation": True, "expect": [{"final_answer_contains_any": ["canceled", "unchanged"]}, {"state_changed": False}]},
+                ],
+            },
+        ),
+        EvalQuestion(
+            "full_delete_approve_and_rollback",
+            "Scenario: approve full delete, verify empty dataset, then rollback.",
+            special="scenario",
+            scenario={
+                "fresh_session": True,
+                "datasets": ["softbank"],
+                "steps": [
+                    {"ask": "Delete everything.", "expect": [{"confirmation_required": True}, "state_not_changed_before_approval"]},
+                    {"approve_confirmation": True, "expect": [{"state_changed": True}, {"final_answer_contains_any": ["0", "zero"]}]},
+                    {"ask": "How many records are in the current working dataset now?", "expect": [{"final_answer_contains_any": ["0", "zero"]}, {"state_changed": False}]},
+                    {"ask": "Roll back to the original uploaded dataset.", "expect": [{"confirmation_required": True}]},
+                    {"approve_confirmation": True, "expect": [{"state_changed": True}]},
+                    {"ask": "How many records are in the current working dataset now?", "expect": [{"final_answer_contains_any": ["24410", "24,410"]}, {"state_changed": False}]},
                 ],
             },
         ),
@@ -1991,10 +2412,30 @@ SUITES: dict[str, list[EvalQuestion]] = {
                 "fresh_session": True,
                 "datasets": ["softbank"],
                 "steps": [
-                    {"ask": "Create a branch called advanced-eval from the current dataset.", "expect": [{"final_answer_contains_any": ["advanced-eval", "branch"]}, {"state_changed": True}]},
+                    {"ask": "Create a branch called advanced-eval from the current dataset.", "expect": [{"final_answer_contains_any": ["advanced-eval", "branch"]}, {"state_changed": True}, "no_code_failures"]},
                     {"ask": "Show me the mutation history so far.", "expect": [{"final_answer_contains_any": ["advanced-eval", "branch", "version"]}, {"state_changed": False}]},
-                    {"ask": "Switch back to the main branch.", "expect": [{"confirmation_required": True}, {"allow_internal_trace_failures": True}]},
-                    {"approve_confirmation": True, "expect": [{"final_answer_contains_any": ["main", "branch", "applied"]}]},
+                    {"ask": "Switch back to the main branch.", "expect": [{"final_answer_contains_any": ["main", "branch"]}, {"state_changed": True}, "no_code_failures"]},
+                    {"ask": "How many records are in the current working dataset now?", "expect": [{"final_answer_contains_any": ["24410", "24,410"]}, {"state_changed": False}]},
+                ],
+            },
+        ),
+        EvalQuestion(
+            "branch_isolation_delete",
+            "Scenario: branch mutations are isolated from main.",
+            special="scenario",
+            scenario={
+                "fresh_session": True,
+                "datasets": ["softbank"],
+                "steps": [
+                    {"ask": "How many records are in the current working dataset?", "expect": [{"final_answer_contains_any": ["24410", "24,410"]}, {"state_changed": False}]},
+                    {"ask": "Create a branch called branch-a from the current dataset.", "expect": [{"final_answer_contains_any": ["branch-a", "branch"]}, {"state_changed": True}, "no_code_failures"]},
+                    {"ask": "delete last 500 entries", "expect": [{"confirmation_required": True}]},
+                    {"approve_confirmation": True, "expect": [{"state_changed": True}, {"final_answer_contains_any": ["23910", "23,910"]}]},
+                    {"ask": "How many records are in the current working dataset now?", "expect": [{"final_answer_contains_any": ["23910", "23,910"]}, {"state_changed": False}]},
+                    {"ask": "Switch back to the main branch.", "expect": [{"final_answer_contains_any": ["main", "branch"]}, {"state_changed": True}, "no_code_failures"]},
+                    {"ask": "How many records are in the current working dataset now?", "expect": [{"final_answer_contains_any": ["24410", "24,410"]}, {"state_changed": False}]},
+                    {"ask": "Switch to branch-a.", "expect": [{"final_answer_contains_any": ["branch-a", "branch"]}, {"state_changed": True}, "no_code_failures"]},
+                    {"ask": "How many records are in the current working dataset now?", "expect": [{"final_answer_contains_any": ["23910", "23,910"]}, {"state_changed": False}]},
                 ],
             },
         ),
@@ -2011,7 +2452,7 @@ SUITES: dict[str, list[EvalQuestion]] = {
                     {"ask": "How many records are in the current working dataset now?", "expect": [{"final_answer_contains_any": ["23910", "23,910"]}]},
                     {"refresh_session": True, "expect": [{"message_count_min": 2}, {"artifact_count_min": 0}]},
                     {"inspect_mutation_history": True, "expect": []},
-                    {"restart_backend_optional": True, "expect": [{"warning": "Backend restart persistence requires an externally managed restart in this environment."}]},
+                    {"restart_backend_optional": True, "expect": [{"restart_executed": True}]},
                 ],
             },
         ),
@@ -2060,20 +2501,16 @@ SUITES: dict[str, list[EvalQuestion]] = {
         ),
         EvalQuestion(
             "custom_sensor_mutation_reject_and_rollback",
-            "Scenario: custom object low-battery mutation reject, approve, and rollback.",
+            "Scenario: custom object low-battery mutation is clearly unsupported and read-only analysis still works.",
             special="scenario",
             scenario={
                 "fresh_session": True,
                 "datasets": ["custom_sensor_fleet"],
                 "steps": [
-                    {"ask": "Remove readings with battery_pct below 80, but ask for confirmation first.", "expect": [{"confirmation_required": True}, "state_not_changed_before_approval"]},
-                    {"reject_confirmation": True, "expect": [{"state_changed": False}]},
-                    {"ask": "How many sensor readings are in the current dataset?", "expect": [{"state_changed": False}]},
-                    {"ask": "Remove readings with battery_pct below 80, but ask for confirmation first.", "expect": [{"confirmation_required": True}]},
-                    {"approve_confirmation": True, "expect": [{"state_changed_or_unsupported_warning": True}, {"warning": "Custom object battery mutation may be unsupported by the optimized mutator in this environment."}]},
-                    {"ask": "Show me the mutation history so far.", "expect": [{"final_answer_contains_any": ["battery", "version", "main"]}]},
-                    {"ask": "Roll back to the original uploaded dataset.", "expect": [{"confirmation_required": True}]},
-                    {"approve_confirmation": True, "expect": [{"state_changed": True}]},
+                    {"ask": "Remove readings with battery_pct below 80, but ask for confirmation first.", "expect": [{"confirmation_required": False}, {"final_answer_contains_any": ["cannot", "custom object", "unchanged", "State changed"]}, {"state_changed": False}]},
+                    {"ask": "How many sensor readings are in the current dataset?", "expect": [{"state_changed": False}, {"final_answer_contains_any": ["reading", "sensor"]}]},
+                    {"ask": "Summarize the battery_pct distribution and show a table of sensor readings if possible.", "expect": ["table_artifact", {"state_changed": False}]},
+                    {"ask": "Roll back to the original uploaded dataset.", "expect": [{"final_answer_contains_any": ["already", "no rollback", "unchanged"]}, {"state_changed": False}]},
                 ],
             },
         ),
@@ -2228,7 +2665,7 @@ SUITES: dict[str, list[EvalQuestion]] = {
         EvalQuestion("alert_counts_bar", "Create a bar chart of alert counts by alert type.", ["chart_artifact", "chart_type_bar", "chart_data_valid", "alert_count_chart_fields", "no_generic_dataset_chart"], dataset_key="custom_sensor_fleet"),
         EvalQuestion("high_vibration_table", "Find sensors with high vibration alerts and show a table.", ["table_artifact", {"any_of": ["sensor", "vibration", "alert"]}], dataset_key="custom_sensor_fleet"),
         EvalQuestion("export_alerts", "Export all alerts as CSV with sensor_id, timestamp, alert_type, severity, value.", ["csv_artifact", "state_changed_false"], dataset_key="custom_sensor_fleet"),
-        EvalQuestion("remove_low_battery", "Remove readings with battery_pct below 5, but ask for confirmation first.", ["zero_affected_no_confirmation_or_confirmation_required", "state_not_changed_before_approval"], dataset_key="custom_sensor_fleet"),
+        EvalQuestion("remove_low_battery", "Remove readings with battery_pct below 5, but ask for confirmation first.", [{"any_of": ["0", "unsupported", "custom object", "unchanged"]}, "state_changed_false"], dataset_key="custom_sensor_fleet"),
     ],
     "generated_mixed_top_level_collection": [
         EvalQuestion("inspect_mixed", "What's in this file? Explain each top-level element and its type.", [{"any_of": ["mixed", "top-level", "DataFrame", "numpy", "tuple"]}], warnings=["llm_verifier_called_or_fallback"], dataset_key="mixed_top_level_collection"),

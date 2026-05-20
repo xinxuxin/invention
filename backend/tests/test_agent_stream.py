@@ -881,6 +881,89 @@ def test_delete_last_entries_shortcut_confirms_and_approval_mutates(client: Test
     assert dataset_response.json()["profile"]["shape"] == [1, 2]
 
 
+def test_delete_everything_requires_phrase_and_rolls_back(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+    fake = ScriptedModelClient([_tool_response("execute_python", {"code": "raise RuntimeError('should not run')"})])
+    app.dependency_overrides[get_model_client] = lambda: fake
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Delete everything.", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+    confirmation = next(event for event in events if event["type"] == "confirmation_required")
+
+    assert fake.calls == 0
+    assert "bad record" not in json.dumps(events).lower()
+    assert confirmation["risk_level"] == "high"
+    assert confirmation["operation_summary"] == "Delete all records from the current working dataset"
+    assert confirmation["affected_count"] == 3
+    assert confirmation["new_row_count"] == 0
+    assert confirmation["required_confirmation_phrase"] == "Yes, delete all records"
+
+    missing_phrase = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+    )
+    assert missing_phrase.status_code == 400
+    assert client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}").json()["profile"]["shape"] == [3, 2]
+
+    approve_response = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/approve",
+        json={"confirmation_phrase": "Yes, delete all records"},
+    )
+    assert approve_response.status_code == 200
+    assert client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}").json()["profile"]["shape"] == [0, 2]
+
+    rollback = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Roll back to the original uploaded dataset.", "active_dataset_id": dataset_id},
+    )
+    rollback_confirmation = next(event for event in _parse_sse(rollback.text) if event["type"] == "confirmation_required")
+    rollback_approve = client.post(
+        f"/api/sessions/{session_id}/confirmations/{rollback_confirmation['confirmation_id']}/approve",
+    )
+    assert rollback_approve.status_code == 200
+    assert client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}").json()["profile"]["shape"] == [3, 2]
+
+
+def test_reject_delete_everything_leaves_dataset_unchanged(client: TestClient) -> None:
+    session_id, dataset_id = _create_dataset(client)
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Delete everything.", "active_dataset_id": dataset_id},
+    )
+    confirmation = next(event for event in _parse_sse(response.text) if event["type"] == "confirmation_required")
+    reject = client.post(
+        f"/api/sessions/{session_id}/confirmations/{confirmation['confirmation_id']}/reject",
+    )
+
+    assert reject.status_code == 200
+    assert reject.json()["events"][-2]["state_changed"] is False
+    assert client.get(f"/api/sessions/{session_id}/datasets/{dataset_id}").json()["profile"]["shape"] == [3, 2]
+
+
+def test_custom_object_low_battery_mutation_is_clear_unsupported_noop(client: TestClient) -> None:
+    class SensorFleet:
+        def __init__(self) -> None:
+            self.sensors = [{"readings": [{"battery_pct": 10}, {"battery_pct": 90}]}]
+
+    session_response = client.post("/api/sessions", json={"name": "Custom object no-op"})
+    session_id = session_response.json()["id"]
+    dataset_id = _upload_pickle(client, session_id, "fleet.pkl", SensorFleet())
+
+    response = client.post(
+        f"/api/sessions/{session_id}/chat/stream",
+        json={"message": "Remove readings with battery_pct below 80, but ask for confirmation first.", "active_dataset_id": dataset_id},
+    )
+    events = _parse_sse(response.text)
+
+    assert not any(event["type"] == "confirmation_required" for event in events)
+    assert events[-2]["type"] == "final_answer"
+    assert events[-2]["state_changed"] is False
+    assert "custom object" in events[-2]["answer"].lower()
+
+
 def test_delete_empty_title_scans_full_dataset_and_confirms(client: TestClient) -> None:
     session_response = client.post("/api/sessions", json={"name": "Delete title test"})
     session_id = session_response.json()["id"]

@@ -373,6 +373,38 @@ Use `--quick` for a shorter smoke pass, `--approve-mutations` when you intention
 harness to approve dangerous write confirmations, and `--browser-smoke`/`--include-screenshots`
 when Playwright is installed and the frontend is running.
 
+Install the browser smoke dependencies once before running screenshot-enabled evals:
+
+```bash
+cd backend
+python -m pip install '.[dev]'
+python -m playwright install chromium
+
+cd ../frontend
+npm install
+npm run playwright:install
+```
+
+Advanced real eval runs browser smoke and subprocess backend-restart persistence checks by default:
+
+```bash
+python backend/scripts/evaluate_agent_demo.py \
+  --suite advanced_real \
+  --dataset /Users/macbook/Desktop/softbank_group_patent_portfolio_metadata.pkl \
+  --dataset-dir ./agent_test_datasets \
+  --base-url http://127.0.0.1:8000 \
+  --frontend-url http://localhost:5173 \
+  --out backend/eval_reports/advanced_real_latest \
+  --use-real-agent \
+  --require-real-agent \
+  --approval-policy mixed \
+  --include-screenshots \
+  --browser-smoke
+```
+
+Use `--skip-browser` or `--skip-restart-persistence` only when you intentionally want to skip those
+hard QA gates; skipped gates are reported explicitly.
+
 Each eval run creates:
 
 - `report.md`: human-reviewable pass/fail/warning summary, final answer excerpts, artifacts, trace

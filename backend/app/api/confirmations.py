@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlmodel import Session, select
 
 from app.agent.agent import OpenAIResponsesClient
@@ -32,11 +32,18 @@ def approve_confirmation(
     confirmation_id: str,
     db: Annotated[Session, Depends(get_session)],
     model_client: Annotated[OpenAIResponsesClient, Depends(get_model_client)],
+    payload: dict[str, Any] = Body(default_factory=dict),
 ) -> ConfirmationActionResponse:
     confirmation = _pending_confirmation_or_404(session_id, confirmation_id, db)
     if confirmation.tool_arguments.get("operation_kind") == "rollback":
         return _approve_rollback_confirmation(confirmation, db)
-    if confirmation.tool_arguments.get("operation_kind") in {"delete_last_n", "delete_empty_title", "remove_battery_below"}:
+    if confirmation.tool_arguments.get("operation_kind") in {
+        "delete_last_n",
+        "delete_empty_title",
+        "delete_all_records",
+        "remove_battery_below",
+    }:
+        _validate_required_phrase(confirmation, payload)
         return _approve_direct_mutation_confirmation(confirmation, db)
 
     events: list[dict[str, Any]] = [
@@ -228,6 +235,8 @@ def _approve_direct_mutation_confirmation(
             new_value, preview = _delete_last_n_value(current_value, int(confirmation.tool_arguments.get("delete_count") or 0))
         elif operation_kind == "delete_empty_title":
             new_value, preview = _delete_empty_title_value(current_value)
+        elif operation_kind == "delete_all_records":
+            new_value, preview = _delete_all_records_value(current_value)
         elif operation_kind == "remove_battery_below":
             new_value, preview = _remove_battery_below_value(
                 current_value,
@@ -355,6 +364,25 @@ def _delete_empty_title_value(value: Any) -> tuple[Any, dict[str, Any]]:
     }
 
 
+def _delete_all_records_value(value: Any) -> tuple[Any, dict[str, Any]]:
+    current_count = _safe_len(value)
+    if isinstance(value, pd.DataFrame):
+        new_value = value.iloc[0:0].copy()
+    elif isinstance(value, list):
+        new_value = []
+    elif isinstance(value, tuple):
+        new_value = tuple()
+    else:
+        raise ValueError("This object type does not support deleting all records safely")
+    return new_value, {
+        "full_scan": True,
+        "affected_count": int(current_count),
+        "deleted_count": int(current_count),
+        "current_row_count": int(current_count),
+        "new_row_count": 0,
+    }
+
+
 def _remove_battery_below_value(value: Any, threshold: float) -> tuple[Any, dict[str, Any]]:
     def keep(item: Any) -> bool:
         record = object_to_record(item)
@@ -418,6 +446,18 @@ def _is_iterable_records(value: Any) -> bool:
     except TypeError:
         return False
     return True
+
+
+def _validate_required_phrase(confirmation: PendingConfirmation, payload: dict[str, Any]) -> None:
+    phrase = confirmation.tool_arguments.get("required_confirmation_phrase")
+    if not isinstance(phrase, str) or not phrase.strip():
+        return
+    supplied = payload.get("confirmation_phrase") or payload.get("phrase")
+    if str(supplied or "").strip().lower() != phrase.strip().lower():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"This high-risk mutation requires the confirmation phrase: {phrase}",
+        )
 
 
 def _persist_direct_mutation(

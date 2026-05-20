@@ -888,7 +888,7 @@ class CodingAgent:
             affected_dataset_ids=self._affected_dataset_ids(session_id, code, request.active_dataset_id),
             risk_level=risk_level_for_code(code),
             active_dataset_id=request.active_dataset_id,
-            branch_name=request.branch_name,
+            branch_name=_active_branch_name(self.db, session_id, request.branch_name),
             tool_arguments=tool_arguments,
             model_input_items=input_items,
             tool_call_id=tool_call_id,
@@ -925,8 +925,9 @@ class CodingAgent:
             "state_impact": "This will create a new version on the current branch.",
             "reversible": True,
             "rollback_note": "You can rollback to the previous version from mutation history.",
+            "required_confirmation_phrase": confirmation.tool_arguments.get("required_confirmation_phrase"),
             "affected_dataset_ids": confirmation.affected_dataset_ids,
-            "confirm_label": "Apply change",
+            "confirm_label": "Apply high-risk change" if confirmation.risk_level == "high" else "Apply change",
             "cancel_label": "Cancel",
         }
 
@@ -945,6 +946,9 @@ class CodingAgent:
         request: ChatStreamRequest,
     ) -> list[dict[str, Any]] | None:
         lowered = request.message.lower().strip()
+        if _is_full_delete_request(lowered):
+            return self._confirm_delete_all(session_id, request)
+
         last_match = re.search(r"\b(?:delete|remove|drop)\s+last\s+(\d+)\s+(?:entries|rows|records)\b", lowered)
         if last_match:
             return self._confirm_delete_last_n(session_id, request, int(last_match.group(1)))
@@ -976,6 +980,21 @@ class CodingAgent:
         if dataset is None:
             return [{"type": "error", "message": "No active dataset is available for mutation."}]
         value = load_pickle(Path(dataset.current_snapshot_path))
+        if not _supports_safe_direct_sequence_mutation(value):
+            return [
+                {"type": "trace", "message": "Checked whether the active object can be safely mutated by the optimized mutator."},
+                {
+                    "type": "final_answer",
+                    "answer": (
+                        "I did not apply this mutation because the active dataset is a custom object whose readings "
+                        "cannot be reconstructed safely by the optimized mutator.\n\n"
+                        "A safe next step is to normalize the readings into a table or CSV, review the rows to remove, "
+                        "and then persist a tabular cleaned version if that is acceptable.\n\n"
+                        "**State changed:** No"
+                    ),
+                    "state_changed": False,
+                },
+            ]
         rows = flatten_records_at_path(value, "readings") or flatten_records_at_path(value, "sensors.readings")
         if not rows:
             try:
@@ -1057,6 +1076,70 @@ class CodingAgent:
             self._confirmation_event(
                 confirmation,
                 message="Removing low-battery readings changes the active dataset state. Please confirm before I apply it.",
+            ),
+        ]
+
+    def _confirm_delete_all(
+        self,
+        session_id: str,
+        request: ChatStreamRequest,
+    ) -> list[dict[str, Any]]:
+        dataset = self._active_dataset_for_request(session_id, request.active_dataset_id)
+        if dataset is None:
+            return [{"type": "error", "message": "No active dataset is available for deletion."}]
+        value = load_pickle(Path(dataset.current_snapshot_path))
+        if not _supports_safe_direct_sequence_mutation(value):
+            return [
+                {"type": "trace", "message": "Checked whether the active object supports full-record deletion."},
+                {
+                    "type": "final_answer",
+                    "answer": (
+                        "I cannot safely delete every record from this object type with the optimized mutator. "
+                        "The dataset was left unchanged.\n\n"
+                        "**State changed:** No"
+                    ),
+                    "state_changed": False,
+                },
+            ]
+        current_count = len(value) if hasattr(value, "__len__") else len(to_dataframe(value, limit=None))
+        code = "\n".join(
+            [
+                "current_count = len(data) if hasattr(data, '__len__') else len(to_dataframe(data, limit=None))",
+                "if isinstance(data, pd.DataFrame):",
+                "    data = data.iloc[0:0].copy()",
+                "elif isinstance(data, list):",
+                "    data = []",
+                "elif isinstance(data, tuple):",
+                "    data = tuple()",
+                "else:",
+                "    frame = to_dataframe(data, limit=None)",
+                "    data = frame.iloc[0:0].copy()",
+                "RESULT = {'full_scan': True, 'deleted_count': current_count, 'affected_count': current_count, 'current_row_count': current_count, 'new_row_count': 0}",
+            ]
+        )
+        confirmation = self._direct_confirmation(
+            session_id=session_id,
+            request=request,
+            dataset=dataset,
+            code=code,
+            operation_summary="Delete all records from the current working dataset",
+            risk_level="high",
+            metadata={
+                "operation_kind": "delete_all_records",
+                "current_row_count": current_count,
+                "new_row_count": 0,
+                "affected_count": current_count,
+                "required_confirmation_phrase": "Yes, delete all records",
+            },
+        )
+        return [
+            {"type": "trace", "message": "High-risk full-dataset deletion requires explicit confirmation."},
+            self._confirmation_event(
+                confirmation,
+                message=(
+                    "This will delete all records from the current working dataset. This cannot be treated as a cleanup rule. "
+                    "Confirm only if you explicitly want the working dataset to become empty."
+                ),
             ),
         ]
 
@@ -1223,7 +1306,7 @@ class CodingAgent:
             affected_dataset_ids=[dataset.id],
             risk_level=risk_level,
             active_dataset_id=dataset.id,
-            branch_name=request.branch_name,
+            branch_name=_active_branch_name(self.db, session_id, request.branch_name),
             tool_arguments={"mutates_state": True, "mutation_summary": operation_summary, **metadata},
             model_input_items=[],
             tool_call_id=None,
@@ -1630,6 +1713,8 @@ class CodingAgent:
                 "rollback",
                 "roll back",
                 "go back",
+                "switch back",
+                "switch to",
                 "switch branch",
                 "checkout",
                 "check out",
@@ -1670,11 +1755,15 @@ class CodingAgent:
         if target_branch and any(phrase in message for phrase in ("switch", "checkout", "check out")):
             datasets = list(self.db.exec(select(Dataset).where(Dataset.session_id == session_id)).all())
             checkout_branch(session, target_branch, datasets, self.db)
+            count_text = _active_dataset_count_text(session, self.db)
             return [
                 {"type": "trace", "message": f"Checking out branch '{target_branch.name}'..."},
                 {
                     "type": "final_answer",
-                    "answer": f"Checked out branch '{target_branch.name}'. Future analysis will use that branch state.",
+                    "answer": (
+                        f"Checked out branch `{target_branch.name}`. Future analysis will use that branch state."
+                        f"{count_text}\n\n**State changed:** Yes"
+                    ),
                     "state_changed": True,
                 },
             ]
@@ -1711,7 +1800,11 @@ class CodingAgent:
                 {"type": "trace", "message": f"Forking version {source.id[:8]} into branch '{name}'..."},
                 {
                     "type": "final_answer",
-                    "answer": f"Created and checked out branch '{name}' from the requested version.",
+                    "answer": (
+                        f"Created and checked out branch `{name}` from version `{source.id[:8]}`. "
+                        "The new branch now has its own version pointer for subsequent mutations.\n\n"
+                        "**State changed:** Yes"
+                    ),
                     "state_changed": True,
                 },
             ]
@@ -1719,7 +1812,29 @@ class CodingAgent:
         if "rollback" in message or "roll back" in message or "go back" in message:
             target = self._version_for_rollback_request(branch, message)
             if target is None:
-                return [{"type": "error", "message": "There is no earlier version to roll back to."}]
+                return [
+                    {
+                        "type": "final_answer",
+                        "answer": (
+                            f"There is no earlier version to roll back to on branch `{branch.name}`. "
+                            "The dataset state was left unchanged.\n\n**State changed:** No"
+                        ),
+                        "state_changed": False,
+                    }
+                ]
+            if branch.current_version_id == target.id:
+                count_text = _active_dataset_count_text(session, self.db)
+                return [
+                    {"type": "trace", "message": "The requested rollback target is already active."},
+                    {
+                        "type": "final_answer",
+                        "answer": (
+                            f"The requested version is already active on branch `{branch.name}`, so no rollback was applied."
+                            f"{count_text}\n\n**State changed:** No"
+                        ),
+                        "state_changed": False,
+                    },
+                ]
             if not request.confirmed:
                 confirmation = PendingConfirmation(
                     session_id=session_id,
@@ -1763,7 +1878,10 @@ class CodingAgent:
                 {"type": "trace", "message": "Restoring the requested version as a new history node..."},
                 {
                     "type": "final_answer",
-                    "answer": f"Rolled back to '{target.mutation_summary or target.label}' on branch '{branch.name}'.",
+                    "answer": (
+                        f"Rolled back to `{target.mutation_summary or target.label}` on branch `{branch.name}`."
+                        f"{_active_dataset_count_text(session, self.db)}\n\n**State changed:** Yes"
+                    ),
                     "state_changed": True,
                 },
             ]
@@ -1914,7 +2032,6 @@ def _clarification_for_ambiguous_destructive_request(message: str) -> str | None
         "remove bad records",
         "drop bad records",
         "delete bad rows",
-        "delete everything",
         "fix the data",
         "drop everything irrelevant",
         "remove irrelevant records",
@@ -2028,6 +2145,51 @@ def _numeric_below(value: Any, threshold: float) -> bool:
         return float(value) < threshold
     except (TypeError, ValueError):
         return False
+
+
+def _is_full_delete_request(message: str) -> bool:
+    lowered = message.lower().strip().rstrip(".!")
+    phrases = (
+        "delete everything",
+        "remove all records",
+        "clear the dataset",
+        "wipe this dataset",
+        "delete all rows",
+        "delete all records",
+        "drop all data",
+        "drop all rows",
+        "drop all records",
+    )
+    return any(phrase in lowered for phrase in phrases)
+
+
+def _supports_safe_direct_sequence_mutation(value: Any) -> bool:
+    return isinstance(value, (pd.DataFrame, list, tuple))
+
+
+def _active_dataset_count_text(session: AnalysisSession, db: Session) -> str:
+    dataset_id = session.active_dataset_id
+    dataset = db.get(Dataset, dataset_id) if dataset_id else None
+    if dataset is None:
+        return ""
+    profile = dataset.profile or {}
+    count = profile.get("length") or profile.get("row_count")
+    shape = profile.get("shape")
+    if count is None and isinstance(shape, list) and shape:
+        count = shape[0]
+    if isinstance(count, (int, float)) and not isinstance(count, bool):
+        return f" Current active dataset count: {int(count):,}."
+    return ""
+
+
+def _active_branch_name(db: Session, session_id: str, fallback: str = "main") -> str:
+    session = db.get(AnalysisSession, session_id)
+    if session is None:
+        return fallback
+    try:
+        return active_branch(session, db).name
+    except Exception:
+        return fallback
 
 
 def _branch_exists(session_id: str, name: str, db: Session) -> bool:
@@ -2503,6 +2665,54 @@ def _common_table_export_code(message: str) -> str | None:
     request_text = json.dumps(prompt)
     if any(marker in prompt for marker in ("chart", "plot", "graph", "visualize", "visualization")):
         return None
+    if any(marker in prompt for marker in ("what's in the active dataset", "what is in the active dataset", "what's in this file", "what is in this file", "explain the structure")):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "summary = summarize_structure(data)",
+                "top_keys = summary.get('top_level_keys') or summary.get('keys') or []",
+                "collections = summary.get('record_collections_detected') or []",
+                "collection_paths = [str(item.get('path')) for item in collections[:8] if isinstance(item, dict)]",
+                "RESULT = {'summary': 'Active dataset structure inspected.', 'object_type': summary.get('object_type'), 'top_level_keys': top_keys, 'record_collections': collection_paths, 'tables_detected': summary.get('tables_detected', []), 'arrays_detected': summary.get('arrays_detected', []), 'state_changed': False}",
+            ]
+        )
+    if "sensor" in prompt and "reading" in prompt and "how many" in prompt:
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = flatten_records_at_path(data, 'readings') or flatten_records_at_path(data, 'sensors.readings')",
+                "reading_count = len(rows)",
+                "RESULT = {'summary': f'The active custom sensor dataset contains {reading_count:,} sensor readings.', 'sensor_reading_count': reading_count, 'state_changed': False}",
+            ]
+        )
+    if "battery_pct" in prompt and "sensor" in prompt and ("table" in prompt or "distribution" in prompt):
+        return "\n".join(
+            [
+                f"request_text = {request_text}",
+                "rows = flatten_records_at_path(data, 'readings') or flatten_records_at_path(data, 'sensors.readings')",
+                "df = pd.DataFrame(rows)",
+                "if df.empty:",
+                "    raise ValueError('Could not find sensor readings to summarize.')",
+                "display_cols = [col for col in ['sensor_id', 'timestamp', 'site', 'zone', 'temperature_c', 'vibration_g', 'battery_pct'] if col in df.columns]",
+                "if not display_cols:",
+                "    display_cols = list(df.columns)[:12]",
+                "table = df[display_cols].copy()",
+                "table.attrs['source_row_count'] = len(df)",
+                "table.attrs['source_total_row_count'] = len(df)",
+                "table.attrs['analyzed_row_count'] = len(df)",
+                "save_table('Sensor readings battery summary', table, description='Sensor readings with battery_pct and related fields.')",
+                "battery = pd.to_numeric(df.get('battery_pct'), errors='coerce') if 'battery_pct' in df.columns else pd.Series(dtype=float)",
+                "valid_battery = battery.dropna()",
+                "if len(valid_battery):",
+                "    bins = pd.cut(valid_battery, bins=[0, 20, 40, 60, 80, 100], include_lowest=True).astype(str)",
+                "    dist = bins.value_counts().sort_index().reset_index()",
+                "    dist.columns = ['battery_pct_range', 'reading_count']",
+                "    dist_rows = dist.to_dict('records')",
+                "    save_table('Battery percentage distribution', dist_rows, description='Readings grouped into battery_pct ranges.')",
+                "    save_chart('Battery Percentage Distribution', {'title': 'Battery Percentage Distribution', 'chart_type': 'bar', 'data': dist_rows, 'x': 'battery_pct_range', 'y': 'reading_count', 'description': 'Distribution of sensor readings by battery percentage range.'})",
+                "RESULT = {'summary': f'Summarized {len(df):,} sensor readings and created battery_pct table and distribution artifacts.', 'sensor_reading_count': len(df), 'battery_pct_min': float(battery.min()) if len(valid_battery) else None, 'battery_pct_max': float(battery.max()) if len(valid_battery) else None, 'battery_pct_mean': float(battery.mean()) if len(valid_battery) else None, 'state_changed': False}",
+            ]
+        )
     if "join daily_metrics with users" in prompt or ("daily_metrics" in prompt and "users" in prompt and "join" in prompt):
         return "\n".join(
             [
